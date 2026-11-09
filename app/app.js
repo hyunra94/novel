@@ -161,6 +161,7 @@ window.addEventListener("hashchange", route);
 async function route() {
   hideBubble();
   $("#epinfo")?.classList.remove("show");
+  $("#epnav")?.classList.remove("show");
   const parts = (location.hash.slice(1) || "/").split("/").filter(Boolean).map(decodeURIComponent);
   window.scrollTo(0, 0);
   if (!cfg.apiBase) return viewSetup();
@@ -416,7 +417,7 @@ function blockHtml(b, i, work) {
   }
 }
 
-const reader = { workId: null, epId: null, saveTimer: null };
+const reader = { workId: null, epId: null, saveTimer: null, prev: null, next: null };
 
 async function viewReader(workId, epId) {
   reader.workId = workId;
@@ -465,7 +466,14 @@ function renderReader(work, ep, restore, keepBlock) {
   const idx = eps.findIndex(e => e.id === ep.id);
   const prev = idx > 0 ? eps[idx - 1] : null;
   const next = idx >= 0 && idx < eps.length - 1 ? eps[idx + 1] : null;
+  reader.prev = prev;
+  reader.next = next;
   view.innerHTML = `
+    <div class="ep-top">
+      <button class="btn small" id="tPrev" ${prev ? "" : "disabled"}>‹ 이전 화</button>
+      <button class="btn small" id="tList">목록</button>
+      <button class="btn small" id="tNext" ${next ? "" : "disabled"}>다음 화 ›</button>
+    </div>
     <article class="reader ${prefs.showNames ? "" : "nonames"}" id="art">
       <h1>${esc(ep.title)}</h1>
       ${ep.blocks.map((b, i) => blockHtml(b, i, work)).join("")}
@@ -474,8 +482,9 @@ function renderReader(work, ep, restore, keepBlock) {
       <button class="btn" id="pPrev" ${prev ? "" : "disabled"}>◀ 이전 화</button>
       <button class="btn primary" id="pNext" ${next ? "" : "disabled"}>다음 화 ▶</button>
     </div>`;
-  if (prev) $("#pPrev").onclick = () => location.hash = `/ep/${reader.workId}/${prev.id}`;
-  if (next) $("#pNext").onclick = () => location.hash = `/ep/${reader.workId}/${next.id}`;
+  if (prev) $("#pPrev").onclick = $("#tPrev").onclick = () => goEp("prev");
+  if (next) $("#pNext").onclick = $("#tNext").onclick = () => goEp("next");
+  $("#tList").onclick = () => goEp("list");
   $("#art").onclick = onArticleTap;
 
   if (keepBlock != null) scrollToBlock(keepBlock, false);
@@ -509,7 +518,10 @@ window.addEventListener("scroll", () => {
   const max = document.documentElement.scrollHeight - window.innerHeight;
   const pct = max > 0 ? (y / max) * 100 : 100;
   setProgress(pct);
-  if (Math.abs(y - lastY) > 8) $("#top").classList.toggle("hide", y > lastY && y > 120);
+  if (Math.abs(y - lastY) > 8) {
+    $("#top").classList.toggle("hide", y > lastY && y > 120);
+    $("#epnav")?.classList.remove("show");
+  }
   lastY = y;
   hideBubble();
   userScrolledAt = Date.now();
@@ -571,7 +583,36 @@ function showEpInfo() {
   pill.innerHTML = `<b>${esc(ep.title)}</b><span>${esc(work?.title || "")}${work?.title ? " · " : ""}${pct}% 읽음</span>`;
   pill.classList.add("show");
   clearTimeout(infoTimer);
-  infoTimer = setTimeout(() => pill.classList.remove("show"), 2500);
+  showEpNav();
+  infoTimer = setTimeout(() => { pill.classList.remove("show"); $("#epnav")?.classList.remove("show"); }, 3500);
+}
+
+function goEp(where) {
+  if (where === "list") location.hash = `/work/${reader.workId}`;
+  else if (reader[where]) location.hash = `/ep/${reader.workId}/${reader[where].id}`;
+}
+
+// 본문을 누르면 아래쪽에 "이전 화 · 목록 · 다음 화"가 잠깐 뜬다
+function showEpNav() {
+  let nav = $("#epnav");
+  if (!nav) {
+    nav = document.createElement("div");
+    nav.id = "epnav";
+    nav.onclick = e => {
+      const b = e.target.closest("[data-go]");
+      if (!b) return;
+      e.stopPropagation();
+      nav.classList.remove("show");
+      goEp(b.dataset.go);
+    };
+    document.body.appendChild(nav);
+  }
+  nav.innerHTML = `
+    <button data-go="prev" ${reader.prev ? "" : "disabled"}>‹ 이전 화</button>
+    <button data-go="list">목록</button>
+    <button data-go="next" ${reader.next ? "" : "disabled"}>다음 화 ›</button>`;
+  nav.classList.toggle("above", !$("#player").hidden);
+  nav.classList.add("show");
 }
 
 function onArticleTap(e) {
@@ -1444,7 +1485,98 @@ async function pinMatches(pin) {
 
 async function savePin(pin) {
   const salt = [...crypto.getRandomValues(new Uint8Array(12))].map(b => b.toString(16).padStart(2, "0")).join("");
-  LS.set(LOCK_KEY, { salt, hash: await pinHash(pin, salt) });
+  LS.set(LOCK_KEY, { salt, hash: await pinHash(pin, salt), len: pin.length });
+}
+
+// 휴대폰 잠금화면 같은 숫자 키패드. cfg.len을 알면 그 자리 수를 다 누르는 순간 확인한다.
+function pinPad(host, cfg) {
+  let pin = "", busy = false;
+  const keyHandler = e => {
+    if (!host.isConnected || document.querySelector("dialog[open]")) return;
+    if (/^\d$/.test(e.key)) press(e.key);
+    else if (e.key === "Backspace") press("del");
+    else if (e.key === "Enter") press("ok");
+  };
+  const pad = {
+    step(next) { cfg = next; pin = ""; render(); },
+    fail(msg) {
+      pin = "";
+      drawDots();
+      setSub(msg, true);
+      const d = $(".pin-dots", host);
+      d.classList.remove("shake"); void d.offsetWidth; d.classList.add("shake");
+      navigator.vibrate?.(60);
+    },
+    close() { document.removeEventListener("keydown", keyHandler); host.remove(); },
+  };
+  function render() {
+    host.innerHTML = `
+      ${cfg.cancel ? '<button class="pin-cancel" data-cancel>취소</button>' : ""}
+      <div class="pin">
+        <img src="icon.svg" alt="" width="56" height="56">
+        <h2>${esc(cfg.title)}</h2>
+        <p class="pin-sub"></p>
+        <div class="pin-dots"></div>
+        <div class="pin-pad">
+          ${[1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => `<button data-n="${n}">${n}</button>`).join("")}
+          ${cfg.len ? "<span></span>" : '<button class="pin-ok" data-ok>확인</button>'}
+          <button data-n="0">0</button>
+          <button class="pin-del" data-del aria-label="지우기">⌫</button>
+        </div>
+        ${cfg.foot || ""}
+      </div>`;
+    setSub(cfg.sub || "");
+    drawDots();
+    host.querySelectorAll("[data-n]").forEach(b => b.onclick = () => press(b.dataset.n));
+    $("[data-del]", host).onclick = () => press("del");
+    if ($("[data-ok]", host)) $("[data-ok]", host).onclick = () => press("ok");
+    if ($("[data-cancel]", host)) $("[data-cancel]", host).onclick = () => { pad.close(); cfg.cancel(); };
+    cfg.mount?.(host, pad);
+  }
+  function setSub(t, err = false) {
+    const s = $(".pin-sub", host);
+    s.textContent = t;
+    s.classList.toggle("err", err);
+  }
+  function drawDots() {
+    const n = cfg.len || Math.max(4, pin.length);
+    $(".pin-dots", host).innerHTML = Array.from({ length: n }, (_, i) => `<i class="${i < pin.length ? "on" : ""}"></i>`).join("");
+    const ok = $("[data-ok]", host);
+    if (ok) ok.disabled = pin.length < 4;
+  }
+  function press(k) {
+    if (busy) return;
+    if ($(".pin-sub.err", host)) setSub(cfg.sub || "");
+    if (k === "ok") { if (!cfg.len && pin.length >= 4) submit(); return; }
+    if (k === "del") pin = pin.slice(0, -1);
+    else if (pin.length < (cfg.len || 12)) pin += k;
+    drawDots();
+    if (cfg.len && pin.length === cfg.len) submit();
+  }
+  async function submit() {
+    busy = true;
+    const p = pin;
+    await new Promise(r => setTimeout(r, 120)); // 마지막 점이 채워지는 게 보이게
+    try { await cfg.onPin(p, pad); } finally { busy = false; }
+  }
+  document.addEventListener("keydown", keyHandler);
+  render();
+  return pad;
+}
+
+function forgotDialog() {
+  openDialog(`
+    <div class="stack">
+      <h3>비밀번호를 잊었어요</h3>
+      <p>이 기기에 저장된 앱 데이터(연결 정보, 저장된 본문과 음성, 읽던 위치, 잠금)를 모두 지우고 처음부터 시작해요. 노션의 소설은 그대로예요. 다시 쓰려면 앱 키를 넣어야 해요.</p>
+      <div class="row end"><button class="btn" data-close>취소</button><button class="btn primary" id="lkReset">모두 지우기</button></div>
+    </div>`, d => {
+    $("#lkReset", d).onclick = async () => {
+      Object.keys(localStorage).filter(k => k.startsWith("nr.")).forEach(k => localStorage.removeItem(k));
+      for (const name of ["nr-data", "nr-audio", "nr-chunks"]) await caches.delete(name);
+      location.reload();
+    };
+  });
 }
 
 function showLock() {
@@ -1452,79 +1584,66 @@ function showLock() {
   return new Promise(resolve => {
     const el = document.createElement("div");
     el.id = "lock";
-    el.innerHTML = `
-      <div class="lock-box">
-        <img src="icon.svg" alt="" width="64" height="64">
-        <h2>소설 서재</h2>
-        <p class="muted">비밀번호를 입력해 주세요</p>
-        <input id="lkPin" type="password" inputmode="numeric" autocomplete="off" maxlength="20">
-        <button class="btn primary" id="lkGo">열기</button>
-        <button class="btn small" id="lkForgot" style="margin-top:18px;border:0;background:none;color:var(--sub)">비밀번호를 잊었어요</button>
-      </div>`;
     document.body.appendChild(el);
     document.body.classList.add("locked");
-    const input = $("#lkPin", el);
     let fails = 0;
     let waitUntil = 0;
-    const tryOpen = async () => {
-      if (Date.now() < waitUntil) return toast(`${Math.ceil((waitUntil - Date.now()) / 1000)}초 뒤에 다시 해 주세요`);
-      if (await pinMatches(input.value)) {
-        el.remove();
-        document.body.classList.remove("locked");
-        resolve();
-        return;
-      }
-      fails++;
-      input.value = "";
-      if (fails >= 5) { waitUntil = Date.now() + 30000; fails = 0; toast("5번 틀려서 30초 동안 기다려야 해요", 3000); }
-      else toast("비밀번호가 달라요");
-    };
-    $("#lkGo", el).onclick = tryOpen;
-    input.onkeydown = e => { if (e.key === "Enter") tryOpen(); };
-    $("#lkForgot", el).onclick = () => openDialog(`
-      <div class="stack">
-        <h3>비밀번호를 잊었어요</h3>
-        <p>이 기기에 저장된 앱 데이터(연결 정보, 저장된 본문과 음성, 읽던 위치, 잠금)를 모두 지우고 처음부터 시작해요. 노션의 소설은 그대로예요. 다시 쓰려면 앱 키를 넣어야 해요.</p>
-        <div class="row end"><button class="btn" data-close>취소</button><button class="btn primary" id="lkReset">모두 지우기</button></div>
-      </div>`, d => {
-      $("#lkReset", d).onclick = async () => {
-        Object.keys(localStorage).filter(k => k.startsWith("nr.")).forEach(k => localStorage.removeItem(k));
-        for (const name of ["nr-data", "nr-audio", "nr-chunks"]) await caches.delete(name);
-        location.reload();
-      };
+    pinPad(el, {
+      title: "소설 서재",
+      sub: "비밀번호를 눌러 주세요",
+      len: LS.get(LOCK_KEY, {}).len || null,
+      foot: '<button class="pin-link" id="lkForgot">비밀번호를 잊었어요</button>',
+      mount: h => { $("#lkForgot", h).onclick = forgotDialog; },
+      onPin: async (pin, pad) => {
+        if (Date.now() < waitUntil) return pad.fail(`${Math.ceil((waitUntil - Date.now()) / 1000)}초 뒤에 다시 해 주세요`);
+        if (await pinMatches(pin)) {
+          pad.close();
+          document.body.classList.remove("locked");
+          resolve();
+          return;
+        }
+        fails++;
+        if (fails >= 5) { waitUntil = Date.now() + 30000; fails = 0; pad.fail("5번 틀려서 30초 동안 기다려야 해요"); }
+        else pad.fail(`비밀번호가 달라요 (${fails}/5)`);
+      },
     });
-    setTimeout(() => input.focus(), 50);
   });
 }
 
+// 설정 → 앱 잠금: 정하기 / 바꾸기 / 끄기도 같은 키패드 화면으로
 function openPinDialog(mode) {
-  const needOld = mode !== "set";
-  const needNew = mode !== "off";
-  const title = { set: "잠금 비밀번호 정하기", change: "비밀번호 바꾸기", off: "잠금 끄기" }[mode];
-  const d = openDialog(`
-    <div class="stack">
-      <h3>${title}</h3>
-      ${needNew ? '<p class="muted">숫자 4자리 이상. 이 기기에만 저장돼요. 기기마다 따로 정해요.</p>' : ""}
-      ${needOld ? '<div class="field"><label>지금 비밀번호</label><input id="pOld" type="password" inputmode="numeric" maxlength="20"></div>' : ""}
-      ${needNew ? '<div class="field"><label>새 비밀번호</label><input id="pNew" type="password" inputmode="numeric" maxlength="20"></div><div class="field"><label>한 번 더</label><input id="pNew2" type="password" inputmode="numeric" maxlength="20"></div>' : ""}
-      <div class="row end"><button class="btn" data-close>취소</button><button class="btn primary" id="pSave">${mode === "off" ? "끄기" : "저장"}</button></div>
-    </div>`);
-  $("input", d)?.focus();
-  $("#pSave", d).onclick = async () => {
-    if (needOld && !(await pinMatches($("#pOld", d).value))) return toast("지금 비밀번호가 달라요");
-    if (needNew) {
-      const a = $("#pNew", d).value, b = $("#pNew2", d).value;
-      if (!/^\d{4,20}$/.test(a)) return toast("숫자 4자리 이상으로 정해 주세요");
-      if (a !== b) return toast("두 번 입력한 비밀번호가 달라요");
-      await savePin(a);
-      toast(mode === "set" ? "잠금을 켰어요" : "비밀번호를 바꿨어요");
-    } else {
-      LS.del(LOCK_KEY);
-      toast("잠금을 껐어요");
-    }
-    d.close();
-    viewSettings();
-  };
+  const el = document.createElement("div");
+  el.id = "pinsheet";
+  document.body.appendChild(el);
+  const cancel = () => {};
+  const done = msg => { pad.close(); toast(msg); viewSettings(); };
+  const newCfg = () => ({
+    title: mode === "set" ? "잠금 비밀번호 정하기" : "새 비밀번호",
+    sub: "숫자 4~12자리를 누르고 확인",
+    cancel,
+    onPin: first => pad.step({
+      title: "한 번 더",
+      sub: "같은 비밀번호를 다시 눌러 주세요",
+      len: first.length,
+      cancel,
+      onPin: async second => {
+        if (second !== first) { pad.step(newCfg()); pad.fail("두 번 누른 비밀번호가 달라요. 처음부터 다시 정해 주세요"); return; }
+        await savePin(second);
+        done(mode === "set" ? "잠금을 켰어요" : "비밀번호를 바꿨어요");
+      },
+    }),
+  });
+  const pad = pinPad(el, mode === "set" ? newCfg() : {
+    title: "지금 비밀번호",
+    sub: mode === "off" ? "잠금을 끄려면 지금 비밀번호를 눌러 주세요" : "바꾸기 전에 지금 비밀번호를 눌러 주세요",
+    len: LS.get(LOCK_KEY, {}).len || null,
+    cancel,
+    onPin: async (pin, p) => {
+      if (!(await pinMatches(pin))) return p.fail("비밀번호가 달라요");
+      if (mode === "off") { LS.del(LOCK_KEY); done("잠금을 껐어요"); }
+      else p.step(newCfg());
+    },
+  });
 }
 
 document.addEventListener("visibilitychange", () => {

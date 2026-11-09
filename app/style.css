@@ -139,13 +139,41 @@ dialog .stack > * + * { margin-top: 12px; }
 #epinfo b { display: block; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #epinfo span { font-size: 12px; opacity: .75; }
 
-#lock { position: fixed; inset: 0; z-index: 100; background: var(--bg); display: grid; place-items: center; padding: 24px; }
-.lock-box { width: min(320px, 100%); text-align: center; display: grid; gap: 10px; justify-items: center; }
-.lock-box h2 { margin: 6px 0 0; }
-.lock-box input { text-align: center; font-size: 22px; letter-spacing: .3em; }
-.lock-box .btn.primary { width: 100%; }
+#lock, #pinsheet { position: fixed; inset: 0; z-index: 100; background: var(--bg); display: flex; align-items: center; justify-content: center;
+  padding: calc(20px + env(safe-area-inset-top)) 20px calc(20px + env(safe-area-inset-bottom)); user-select: none; -webkit-user-select: none; touch-action: manipulation; }
+#pinsheet { z-index: 105; }
+.pin { width: min(300px, 100%); display: flex; flex-direction: column; align-items: center; font-family: var(--ui); }
+.pin img { border-radius: 14px; margin-bottom: 12px; }
+.pin h2 { margin: 0; font-size: 20px; }
+.pin-sub { min-height: 20px; margin: 8px 0 22px; font-size: 14px; color: var(--sub); text-align: center; }
+.pin-sub.err { color: #c8442f; }
+.pin-dots { display: flex; gap: 14px; height: 16px; margin-bottom: clamp(20px, 6vh, 44px); }
+.pin-dots i { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--sub); box-sizing: border-box; transition: background .12s, transform .12s, border-color .12s; }
+.pin-dots i.on { background: var(--accent); border-color: var(--accent); transform: scale(1.12); }
+.pin-dots.shake { animation: pinshake .4s; }
+@keyframes pinshake { 0%, 100% { transform: translateX(0); } 20%, 60% { transform: translateX(-10px); } 40%, 80% { transform: translateX(10px); } }
+.pin-pad { display: grid; grid-template-columns: repeat(3, 74px); gap: clamp(10px, 2.2vh, 18px) 26px; }
+.pin-pad button { width: 74px; height: 74px; border-radius: 50%; border: 0; background: var(--card); box-shadow: inset 0 0 0 1px var(--line);
+  font: 500 28px var(--ui); color: var(--text); transition: background .1s; -webkit-tap-highlight-color: transparent; }
+.pin-pad button:active { background: var(--accent-soft); }
+.pin-pad .pin-del, .pin-pad .pin-ok { background: none; box-shadow: none; font-size: 16px; font-weight: 600; color: var(--accent); }
+.pin-pad .pin-del { font-size: 24px; color: var(--text); }
+.pin-pad .pin-ok:disabled { opacity: .3; }
+.pin-link { margin-top: clamp(16px, 4vh, 30px); border: 0; background: none; color: var(--sub); font-size: 14px; padding: 8px; }
+.pin-cancel { position: absolute; top: calc(10px + env(safe-area-inset-top)); left: 10px; border: 0; background: none; color: var(--accent); font-size: 16px; font-weight: 600; padding: 10px; }
 body.locked main, body.locked #player, body.locked #top, body.veil main, body.veil #player { visibility: hidden; }
 
 #toast { position: fixed; left: 50%; bottom: calc(110px + var(--safe-b)); transform: translateX(-50%) translateY(20px); opacity: 0; z-index: 110;
   background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 12px; font-size: 14px; transition: all .25s; pointer-events: none; max-width: 90vw; }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ---------- 읽기 화면 회차 이동 ---------- */
+.ep-top { display: flex; gap: 6px; justify-content: space-between; max-width: 680px; margin: 12px auto 0; padding: 0 16px; font-family: var(--ui); }
+.ep-top .btn { background: none; }
+#epnav { position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom)); transform: translate(-50%, 16px); z-index: 23; display: flex; gap: 2px; padding: 5px;
+  background: var(--text); border-radius: 14px; box-shadow: 0 6px 20px rgba(0,0,0,.22); opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; font-family: var(--ui); }
+#epnav.show { opacity: .96; transform: translate(-50%, 0); pointer-events: auto; }
+#epnav.above { bottom: calc(100px + env(safe-area-inset-bottom)); }
+#epnav button { border: 0; background: none; color: var(--bg); padding: 11px 14px; border-radius: 10px; font-size: 14px; font-weight: 600; white-space: nowrap; }
+#epnav button:active { background: rgba(255,255,255,.15); }
+#epnav button:disabled { opacity: .35; }
