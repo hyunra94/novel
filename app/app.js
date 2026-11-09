@@ -1583,6 +1583,13 @@ const RELOCK_MS = 60 * 1000;
 const lockOn = () => Boolean(LS.get(LOCK_KEY, null));
 let hiddenAt = 0;
 
+// 잠금을 푼 뒤 새로고침·자동 업데이트로 다시 열릴 때는 다시 묻지 않는다.
+// 같은 창에서만 기억하고(sessionStorage), 앱을 닫았다 열거나 1분 넘게 비우면 다시 잠근다.
+const AWAKE_KEY = "nr.awake";
+const markAwake = () => { if (!document.body.classList.contains("locked")) sessionStorage.setItem(AWAKE_KEY, String(Date.now())); };
+const stillAwake = () => Date.now() - Number(sessionStorage.getItem(AWAKE_KEY) || 0) < RELOCK_MS;
+window.addEventListener("pagehide", markAwake);
+
 async function pinHash(pin, salt) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${salt}:${pin}`));
   return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
@@ -1691,6 +1698,8 @@ function forgotDialog() {
 
 function showLock() {
   if (!lockOn() || document.getElementById("lock")) return Promise.resolve();
+  if (stillAwake()) { markAwake(); return Promise.resolve(); }
+  sessionStorage.removeItem(AWAKE_KEY);
   return new Promise(resolve => {
     const el = document.createElement("div");
     el.id = "lock";
@@ -1709,6 +1718,7 @@ function showLock() {
         if (await pinMatches(pin)) {
           pad.close();
           document.body.classList.remove("locked");
+          markAwake();
           resolve();
           return;
         }
@@ -1759,6 +1769,7 @@ function openPinDialog(mode) {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     hiddenAt = Date.now();
+    markAwake();
     pushProgress();
     if (lockOn()) document.body.classList.add("veil"); // 최근 앱 화면에 본문이 보이지 않게
     return;
