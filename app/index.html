@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f7f3ec">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <title>소설 서재</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-title" content="소설 서재">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link id="fontlink" rel="stylesheet" href="">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="progress"><i></i></div>
+  <header id="top">
+    <button id="back" class="icon" aria-label="뒤로">‹</button>
+    <div id="title"></div>
+    <div id="actions"></div>
+  </header>
+
+  <main id="view"></main>
+
+  <div id="bubble" hidden></div>
+
+  <section id="player" hidden>
+    <div class="pl-info">
+      <div class="pl-title" id="plTitle"></div>
+      <div class="pl-status" id="plStatus"></div>
+      <div class="pl-bar"><i id="plBar"></i></div>
+    </div>
+    <div class="pl-controls">
+      <button class="icon" id="plBack" aria-label="뒤로 감기">↺</button>
+      <button class="icon big" id="plPlay" aria-label="재생">▶</button>
+      <button class="icon" id="plFwd" aria-label="앞으로 감기">↻</button>
+      <button class="chip" id="plSpeed">1.0×</button>
+      <button class="icon" id="plMore" aria-label="더보기">⋯</button>
+    </div>
+  </section>
+
+  <dialog id="dlg"></dialog>
+  <div id="toast" role="status"></div>
+  <audio id="audio" preload="auto"></audio>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

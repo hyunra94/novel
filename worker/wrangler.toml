@@ -1,0 +1,49 @@
+name = "novelreader"
+main = "worker.js"
+compatibility_date = "2026-05-29"
+
+# 비밀값은 아래 명령으로 따로 넣는다 (이 파일에 적지 않음)
+#   npx wrangler secret put NOTION_TOKEN     ← PaperLog Worker와 같은 노션 토큰
+#   npx wrangler secret put APP_KEY          ← 앱에서 입력할 비밀 키 (길고 아무도 모르는 값)
+#   npx wrangler secret put GOOGLE_TTS_KEY   ← 쓰는 엔진만
+#   npx wrangler secret put AZURE_TTS_KEY
+#   npx wrangler secret put ELEVENLABS_KEY
+
+[vars]
+# 앱 키가 있어야만 쓸 수 있으므로 "*"로 둬도 된다. 막고 싶으면 앱 주소만 쉼표로 적기
+CORS_ORIGIN = "*"
+
+# 작품 목록: Hobby DB(data source)에서 제목에 "소설 기획"이 들어간 페이지
+NOTION_WORKS_DS_ID = "40d6b59b-151a-8048-abd9-000b1635292b"
+WORK_TITLE_PROP = "이름"
+WORK_TITLE_KEYWORD = "소설 기획"
+
+# 작품 페이지 안의 회차 DB와 속성 이름
+EPISODE_DB_TITLE = "회차"
+EP_NO_PROP = "화"
+EP_ROUTE_PROP = "루트"
+EP_STATUS_PROP = "상태"
+EP_SUMMARY_PROP = "한 줄 요약"
+EP_CHARS_PROP = "등장인물"
+
+# 무료 한도의 몇 %에서 멈출지 (0.9 = 90%)
+QUOTA_STOP_RATIO = "0.9"
+# 엔진별 매달 무료 글자 수. 가입할 때 각 회사 가격표에서 한 번 확인해 맞춰 두기
+GOOGLE_FREE_LIMITS = '{"Chirp3-HD":1000000,"Chirp-HD":1000000,"Neural2":1000000,"Wavenet":1000000,"Standard":4000000,"Studio":100000}'
+AZURE_FREE_CHARS = "500000"
+AZURE_TTS_REGION = "koreacentral"
+ELEVENLABS_FREE_CREDITS = "10000"
+# eleven_multilingual_v2(1글자=1크레딧, 감정 표현 좋음) / eleven_flash_v2_5(1글자=0.5크레딧, 두 배로 들음)
+ELEVENLABS_MODEL = "eleven_multilingual_v2"
+
+# 목소리 설정·사용량 저장소. 아래 명령으로 만든 뒤 나온 id를 넣는다
+#   npx wrangler kv namespace create NR_KV
+[[kv_namespaces]]
+binding = "NR_KV"
+id = "4029caef3fe54b849a13a45310b4b80a"
+
+# 만든 음성 조각(mp3) 저장소. 아래 명령으로 만든다 (10GB까지 무료)
+#   npx wrangler r2 bucket create novelreader-audio
+[[r2_buckets]]
+binding = "AUDIO"
+bucket_name = "novelreader-audio"
