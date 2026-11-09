@@ -48,6 +48,10 @@ export default {
       if (path === "/api/voices" && method === "GET") {
         return json({ ok: true, voices: await listVoices(env, url.searchParams.get("engine")) }, 200, cors);
       }
+      if (path === "/api/progress") {
+        if (method === "GET") return json({ ok: true, progress: await getProgress(env) }, 200, cors);
+        if (method === "PUT") return json({ ok: true, progress: await mergeProgress(env, await readJson(request)) }, 200, cors);
+      }
       if (path === "/api/usage" && method === "GET") return json({ ok: true, usage: await getUsage(env) }, 200, cors);
       if (path === "/api/tts" && method === "POST") return json({ ok: true, ...(await tts(env, await readJson(request))) }, 200, cors);
       if ((m = path.match(/^\/api\/chunk\/([a-f0-9]{64})$/)) && method === "GET") return await getChunk(env, m[1], cors);
@@ -504,6 +508,34 @@ async function saveSettings(env, workId, body) {
   };
   await kv(env).put(`voices:${workId}`, JSON.stringify(settings));
   return settings;
+}
+
+/* ---------------- 읽은 기록 (기기끼리 동기화) ----------------
+   read: 다 읽은 회차 id 목록 / pos: 회차별 읽은 위치 {block, pct, at} / last: 마지막으로 연 회차
+   기기마다 보내 온 것을 합친다: read는 합집합, pos·last는 더 최근(at) 것
+------------------------------------------------------------ */
+
+async function getProgress(env) {
+  return (await kv(env).get("progress", "json")) || { read: [], pos: {}, last: null };
+}
+
+async function mergeProgress(env, body) {
+  const cur = await getProgress(env);
+  const read = new Set([...(cur.read || []), ...(Array.isArray(body.read) ? body.read : [])].map(String));
+  const pos = { ...(cur.pos || {}) };
+  for (const [id, v] of Object.entries(body.pos || {})) {
+    if (!v || typeof v !== "object") continue;
+    const at = Number(v.at) || 0;
+    if (at > (pos[id]?.at || 0)) pos[id] = { block: Number(v.block) || 0, pct: Math.min(100, Number(v.pct) || 0), at };
+  }
+  let last = cur.last;
+  if (body.last?.epId && (Number(body.last.at) || 0) > (last?.at || 0)) {
+    const l = body.last;
+    last = { workId: String(l.workId || ""), epId: String(l.epId), workTitle: String(l.workTitle || "").slice(0, 100), epTitle: String(l.epTitle || "").slice(0, 200), at: Number(l.at) };
+  }
+  const next = { read: [...read].slice(-5000), pos, last };
+  await kv(env).put("progress", JSON.stringify(next));
+  return next;
 }
 
 /* ---------------- 목소리 목록 ---------------- */

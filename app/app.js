@@ -272,6 +272,57 @@ async function refreshWork(workId) {
   }
 }
 
+/* ---------- 읽은 기록 (기기끼리 Worker로 동기화) ---------- */
+
+function markRead(epId) {
+  const read = new Set(LS.get("nr.read", []));
+  if (read.has(epId)) return;
+  read.add(epId);
+  LS.set("nr.read", [...read]);
+  queueSync();
+}
+
+function localProgress() {
+  const pos = {};
+  for (const k of Object.keys(localStorage)) {
+    if (!k.startsWith("nr.pos.")) continue;
+    const v = LS.get(k, null);
+    if (v?.at) pos[k.slice(7)] = { block: v.block || 0, pct: v.pct || 0, at: v.at };
+  }
+  return { read: LS.get("nr.read", []), pos, last: LS.get("nr.last", null) };
+}
+
+function applyProgress(p) {
+  if (!p) return;
+  LS.set("nr.read", [...new Set([...LS.get("nr.read", []), ...(p.read || [])])]);
+  for (const [id, v] of Object.entries(p.pos || {})) {
+    const cur = LS.get(`nr.pos.${id}`, {});
+    if ((v.at || 0) > (cur.at || 0)) LS.set(`nr.pos.${id}`, { ...cur, block: v.block, pct: v.pct, at: v.at });
+  }
+  const last = LS.get("nr.last", null);
+  if (p.last?.epId && (p.last.at || 0) > (last?.at || 0)) {
+    LS.set("nr.last", p.last);
+    if (p.last.workId) LS.set(`nr.lastep.${p.last.workId}`, p.last.epId);
+  }
+}
+
+let syncTimer;
+const canSync = () => cfg.apiBase && cfg.apiBase !== "mock" && cfg.apiKey;
+function queueSync() {
+  if (!canSync()) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(pushProgress, 3000);
+}
+async function pushProgress() {
+  clearTimeout(syncTimer);
+  if (!canSync()) return;
+  try { applyProgress((await api("/api/progress", { method: "PUT", body: localProgress() })).progress); } catch { /* 다음에 다시 */ }
+}
+async function pullProgress() {
+  if (!canSync()) return;
+  try { applyProgress((await api("/api/progress")).progress); } catch { /* 오프라인 */ }
+}
+
 function epProgress(epId) {
   const p = LS.get(`nr.pos.${epId}`, null);
   return p?.pct || 0;
@@ -293,18 +344,21 @@ async function viewWork(workId) {
     const last = LS.get(`nr.lastep.${workId}`, null);
     const lastEp = last && work.episodes.find(e => e.id === last);
     view.innerHTML = `
-      ${lastEp ? `<div class="card link continue" id="cont"><div class="emoji">📖</div><div class="grow"><div class="muted">이어 읽기</div><div class="name">${esc(lastEp.title)}</div></div></div>` : ""}
+      ${lastEp ? `<div class="card link continue" id="cont"><div class="emoji">📖</div><div class="grow"><div class="muted">이어 읽기${epProgress(lastEp.id) && !read.has(lastEp.id) ? ` · ${epProgress(lastEp.id)}%` : ""}</div><div class="name">${esc(lastEp.title)}</div></div></div>` : ""}
       ${routes.length > 2 ? `<div class="chips">${routes.map(r => `<button class="chip ${r === filter ? "on" : ""}" data-r="${esc(r)}">${esc(r)}</button>`).join("")}</div>` : ""}
       <div>${eps.map(e => {
         const pct = epProgress(e.id);
         const statusCls = e.status === "완료" ? "done" : e.status === "초안" ? "draft" : "";
-        return `<div class="ep ${read.has(e.id) ? "read" : ""}" data-id="${e.id}">
-          <div class="no">${typeof e.no === "number" ? (e.no === 0 ? "0" : e.no) : "·"}</div>
+        const isRead = read.has(e.id);
+        const reading = !isRead && pct > 0;
+        const isLast = lastEp && lastEp.id === e.id;
+        return `<div class="ep ${isRead ? "read" : ""} ${reading ? "reading" : ""} ${isLast ? "here" : ""}" data-id="${e.id}">
+          <div class="no">${typeof e.no === "number" ? e.no : "·"}${isRead ? '<small>✓</small>' : ""}</div>
           <div class="grow">
             <div class="t">${esc(e.title)}</div>
             ${e.summary ? `<div class="s">${esc(e.summary)}</div>` : ""}
-            <div class="meta">${e.route && e.route !== "본편" ? `<span class="tag">${esc(e.route)}</span>` : ""}${e.status ? `<span class="tag ${statusCls}">${esc(e.status)}</span>` : ""}${read.has(e.id) ? '<span class="tag">다 읽음</span>' : ""}</div>
-            ${pct > 0 && pct < 99 && !read.has(e.id) ? `<div class="bar-mini"><i style="width:${pct}%"></i></div>` : ""}
+            <div class="meta">${isLast ? '<span class="tag here">📖 여기까지 읽음</span>' : ""}${isRead ? '<span class="tag readtag">✓ 다 읽음</span>' : ""}${reading ? `<span class="tag readtag">${pct}% 읽음</span>` : ""}${e.route && e.route !== "본편" ? `<span class="tag">${esc(e.route)}</span>` : ""}${e.status ? `<span class="tag ${statusCls}">${esc(e.status)}</span>` : ""}</div>
+            ${reading ? `<div class="bar-mini"><i style="width:${pct}%"></i></div>` : ""}
           </div></div>`;
       }).join("") || '<div class="empty">회차가 없어요</div>'}</div>
       ${hidden ? `<p class="muted" style="text-align:center;margin-top:16px"><button class="btn small" id="togglePlanned">${prefs.hidePlanned ? `기획 중인 회차 ${hidden}개 보기` : "기획 중인 회차 숨기기"}</button></p>` : ""}`;
@@ -388,8 +442,9 @@ async function viewReader(workId, epId) {
   };
 
   const ctx = LS.get("nr.last", {});
-  LS.set("nr.last", { ...ctx, workId, epId, workTitle: work?.title || "", epTitle: ep.title });
+  LS.set("nr.last", { ...ctx, workId, epId, workTitle: work?.title || "", epTitle: ep.title, at: Date.now() });
   LS.set(`nr.lastep.${workId}`, epId);
+  queueSync();
 
   // 노션에서 바뀌었으면 조용히 새로 고침
   if (cfg.apiBase !== "mock") {
@@ -461,11 +516,10 @@ window.addEventListener("scroll", () => {
   clearTimeout(reader.saveTimer);
   reader.saveTimer = setTimeout(() => {
     if (!$("#art")) return;
-    LS.set(`nr.pos.${reader.epId}`, { ...LS.get(`nr.pos.${reader.epId}`, {}), block: firstVisibleBlock(), pct: Math.round(pct) });
-    if (pct > 97) {
-      const read = new Set(LS.get("nr.read", []));
-      if (!read.has(reader.epId)) { read.add(reader.epId); LS.set("nr.read", [...read]); }
-    }
+    const prev = LS.get(`nr.pos.${reader.epId}`, {});
+    LS.set(`nr.pos.${reader.epId}`, { ...prev, block: firstVisibleBlock(), pct: Math.round(pct), at: Date.now() });
+    if (pct > 97) markRead(reader.epId);
+    queueSync();
   }, 400);
 }, { passive: true });
 
@@ -1058,9 +1112,8 @@ function nextEpisodeOf(workId, epId) {
 
 function onEpisodeEnd() {
   const { workId, epId } = player;
-  const read = new Set(LS.get("nr.read", []));
-  read.add(epId);
-  LS.set("nr.read", [...read]);
+  markRead(epId);
+  queueSync();
   const pos = LS.get(`nr.pos.${epId}`, {});
   delete pos.listenBlock; delete pos.listenTime;
   LS.set(`nr.pos.${epId}`, pos);
@@ -1477,6 +1530,7 @@ function openPinDialog(mode) {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     hiddenAt = Date.now();
+    pushProgress();
     if (lockOn()) document.body.classList.add("veil"); // 최근 앱 화면에 본문이 보이지 않게
     return;
   }
@@ -1517,4 +1571,9 @@ async function installApp() {
 applyLook();
 document.addEventListener("click", e => { if (!e.target.closest("#bubble") && !e.target.closest("#art")) hideBubble(); });
 if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
-showLock().then(route);
+showLock().then(async () => {
+  route();
+  // 다른 기기에서 읽은 기록을 받아 오고, 목록 화면이면 다시 그린다
+  await pullProgress();
+  if (!location.hash.startsWith("#/ep/") && cfg.apiBase) route();
+});
