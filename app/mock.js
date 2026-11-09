@@ -56,6 +56,7 @@ const work = {
 };
 
 let mockShelves = { list: [], of: {}, at: 0 };
+let mockMarks = { items: [] };
 
 export async function mockApi(path, opts = {}) {
   await new Promise(r => setTimeout(r, 120));
@@ -67,6 +68,14 @@ export async function mockApi(path, opts = {}) {
     { id: "w2", title: "예시 작품 2", icon: "🌙", lastEdited: "2026-11-08T12:00:00.000Z" },
     { id: "w3", title: "예시 작품 3", icon: "", lastEdited: "2026-11-01T12:00:00.000Z" },
   ] };
+  if (path === "/api/marks") {
+    if (method === "PUT") {
+      const map = new Map(mockMarks.items.map(m => [m.id, m]));
+      for (const m of opts.body.items) if (!map.has(m.id) || map.get(m.id).at < m.at) map.set(m.id, m);
+      mockMarks = { items: [...map.values()] };
+    }
+    return { ok: true, marks: mockMarks };
+  }
   if (path === "/api/shelves") {
     if (method === "PUT") mockShelves = { ...opts.body };
     return { ok: true, shelves: mockShelves };

@@ -1,6 +1,6 @@
 // 앱 화면 파일만 저장해 두고(오프라인에서도 열리게), 새 버전이 있으면 받아 둔다.
 // 본문·음성은 앱이 Cache API(nr-data, nr-audio, nr-chunks)에 직접 저장한다.
-const SHELL = "nr-shell-v5";
+const SHELL = "nr-shell-v6";
 const FILES = ["./", "index.html", "style.css", "app.js", "mp3.js", "mock.js", "manifest.webmanifest", "icon.svg",
   "icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png"];
 

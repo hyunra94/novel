@@ -169,7 +169,7 @@ async function route() {
   try {
     if (!parts.length) return await viewWorks();
     if (parts[0] === "work") return await viewWork(parts[1]);
-    if (parts[0] === "ep") return await viewReader(parts[1], parts[2]);
+    if (parts[0] === "ep") return await viewReader(parts[1], parts[2], parts[3] != null ? Number(parts[3]) : null);
     if (parts[0] === "voices") return await viewVoices(parts[1]);
     if (parts[0] === "settings") return viewSettings();
     location.hash = "/";
@@ -230,14 +230,14 @@ async function viewWorks() {
     const card = w => `
       <div class="card link" data-go="#/work/${w.id}">
         <div class="emoji">${esc(w.icon || "📘")}</div>
-        <div class="grow"><div class="name">${esc(w.title)}</div><div class="muted">${timeAgo(w.lastEdited)} 수정${shelves.of[w.id] ? ` · ${esc(shelves.of[w.id])}` : ""}</div></div>
+        <div class="grow"><div class="name">${esc(w.title)}</div><div class="muted">${timeAgo(w.lastEdited)} 수정${shelvesOf(w.id).length ? ` · ${esc(shelvesOf(w.id).join(", "))}` : ""}</div></div>
         <button class="icon more" data-more="${w.id}" aria-label="분류 정하기">⋯</button>
       </div>`;
     const all = works || [];
     const NONE = "\u0000none";
     let filter = LS.get("nr.shelfFilter", "전체");
     if (filter !== "전체" && filter !== NONE && !shelves.list.includes(filter)) filter = "전체";
-    const inShelf = name => all.filter(w => (shelves.of[w.id] || NONE) === name);
+    const inShelf = name => all.filter(w => name === NONE ? !shelvesOf(w.id).length : shelvesOf(w.id).includes(name));
     const unsorted = inShelf(NONE);
     const chips = `<div class="chips">
       <button class="chip ${filter === "전체" ? "on" : ""}" data-f="전체">전체 ${all.length}</button>
@@ -366,7 +366,8 @@ function epProgress(epId) {
 }
 
 async function viewWork(workId) {
-  setHeader("", { back: "/", actions: `<button class="icon" id="rfBtn" aria-label="노션에서 새로 불러오기">⟳</button><button class="icon" id="goVoices" aria-label="목소리">🎙</button>` });
+  setHeader("", { back: "/", actions: `<button class="icon" id="wMarks" aria-label="책갈피">🔖</button><button class="icon" id="rfBtn" aria-label="노션에서 새로 불러오기">⟳</button><button class="icon" id="goVoices" aria-label="목소리">🎙</button>` });
+  $("#wMarks").onclick = () => openMarksDialog(workId);
   $("#goVoices").onclick = () => location.hash = `/voices/${workId}`;
   view.innerHTML = '<div class="empty">불러오는 중…</div>';
   let filter = LS.get(`nr.filter.${workId}`, "전체");
@@ -465,18 +466,20 @@ function blockHtml(b, i, work) {
 
 const reader = { workId: null, epId: null, saveTimer: null, prev: null, next: null };
 
-async function viewReader(workId, epId) {
+async function viewReader(workId, epId, jumpBlock = null) {
   reader.workId = workId;
   reader.epId = epId;
   setHeader("", {
     back: `/work/${workId}`,
-    actions: `<button class="icon" id="rListen" aria-label="듣기">🎧</button><button class="icon" id="rLook" aria-label="글자 설정">Aa</button><button class="icon" id="rReload" aria-label="새로고침">⟳</button>`,
+    actions: `<button class="icon" id="rMarks" aria-label="책갈피">🔖</button><button class="icon" id="rListen" aria-label="듣기">🎧</button><button class="icon" id="rLook" aria-label="글자 설정">Aa</button><button class="icon" id="rReload" aria-label="새로고침">⟳</button>`,
   });
   view.innerHTML = '<div class="empty">불러오는 중…</div>';
 
   const work = await loadWork(workId).catch(() => null);
   let ep = await loadEpisode(epId);
-  renderReader(work, ep, true);
+  renderReader(work, ep, jumpBlock == null, jumpBlock);
+  if (jumpBlock != null) { blockEl(jumpBlock)?.classList.add("flash"); history.replaceState(null, "", `#/ep/${workId}/${epId}`); }
+  $("#rMarks").onclick = () => openMarksDialog(workId);
 
   $("#rLook").onclick = openLookPanel;
   $("#rListen").onclick = () => startListening(workId, epId, firstVisibleBlock());
@@ -542,6 +545,7 @@ function renderReader(work, ep, restore, keepBlock) {
     if (pos?.block > 0) scrollToBlock(pos.block, false);
   }
   if (player.epId === ep.id) markSpeaking(player.curBlock, false);
+  paintMarks();
 }
 
 function blockEl(i) { return document.querySelector(`#art [data-i="${i}"]`); }
@@ -684,6 +688,7 @@ function showBubble(el, i) {
   const bub = $("#bubble");
   bub.innerHTML = `
     <button data-a="listen">▶ 여기서부터 듣기</button>
+    <button data-a="mark">${markAt(i) ? "🔖 책갈피 빼기" : "🔖 책갈피"}</button>
     ${canEdit ? '<button data-a="edit">✏️ 고치기</button><button data-a="memo">💬 메모</button>' : ""}`;
   bub.hidden = false;
   const r = el.getBoundingClientRect();
@@ -696,6 +701,7 @@ function showBubble(el, i) {
     if (btn.dataset.a === "listen") startListening(reader.workId, reader.epId, i);
     if (btn.dataset.a === "edit") openEditDialog(i);
     if (btn.dataset.a === "memo") openMemoDialog(i);
+    if (btn.dataset.a === "mark") toggleMark(i);
   });
 }
 
@@ -1734,6 +1740,113 @@ async function installApp() {
     </div>`);
 }
 
+/* ---------------- 책갈피 ----------------
+   문단마다 여러 개. Worker KV `marks`로 기기끼리 합친다(지운 것도 전달).
+------------------------------------------ */
+
+let marks = LS.get("nr.marks", { items: [] });
+const liveMarks = () => marks.items.filter(m => !m.del);
+let marksTimer;
+
+function markAt(i) {
+  const b = state.ep[reader.epId]?.blocks[i];
+  return liveMarks().find(m => m.epId === reader.epId && (b?.id ? m.blockId === b.id : m.i === i));
+}
+
+function markIndex(m, ep) {
+  if (!ep) return m.i;
+  const j = m.blockId ? ep.blocks.findIndex(b => b.id === m.blockId) : -1;
+  return j >= 0 ? j : Math.min(m.i, ep.blocks.length - 1);
+}
+
+function saveMarks() {
+  LS.set("nr.marks", marks);
+  clearTimeout(marksTimer);
+  marksTimer = setTimeout(pushMarks, 800);
+}
+
+async function pushMarks() {
+  try {
+    const r = await api("/api/marks", { method: "PUT", body: marks });
+    marks = r.marks;
+    LS.set("nr.marks", marks);
+  } catch { /* 다음에 다시 보냄 */ }
+}
+
+async function pullMarks() {
+  try {
+    const r = await api("/api/marks");
+    const map = new Map(r.marks.items.map(m => [m.id, m]));
+    let mine = false;
+    for (const m of marks.items) {
+      const o = map.get(m.id);
+      if (!o || (o.at || 0) < (m.at || 0)) { map.set(m.id, m); mine = true; }
+    }
+    marks = { items: [...map.values()] };
+    LS.set("nr.marks", marks);
+    if (mine) pushMarks();
+    if (reader.epId && $("#art")) paintMarks();
+  } catch { /* 오프라인이면 기기 저장본 */ }
+}
+
+function toggleMark(i) {
+  const old = markAt(i);
+  if (old) {
+    Object.assign(old, { del: true, at: Date.now() });
+    toast("책갈피를 뺐어요");
+  } else {
+    const ep = state.ep[reader.epId];
+    const work = state.work[reader.workId];
+    const b = ep.blocks[i];
+    marks.items.unshift({
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+      workId: reader.workId, epId: ep.id, blockId: b.id || "", i,
+      text: (b.plain || "").replace(/^\s*▌\s*/, "").slice(0, 80) || "(구분선)",
+      epTitle: ep.title, workTitle: work?.title || "", at: Date.now(),
+    });
+    toast("🔖 책갈피에 넣었어요");
+  }
+  saveMarks();
+  paintMarks();
+}
+
+function paintMarks() {
+  document.querySelectorAll("#art .marked").forEach(el => el.classList.remove("marked"));
+  const ep = state.ep[reader.epId];
+  for (const m of liveMarks()) if (m.epId === reader.epId) blockEl(markIndex(m, ep))?.classList.add("marked");
+}
+
+function openMarksDialog(workId) {
+  const draw = d => {
+    const list = liveMarks().filter(m => m.workId === workId).sort((a, b) => b.at - a.at);
+    $("#mkList", d).innerHTML = list.length ? list.map(m => `
+      <div class="mark-row" data-go="${m.id}">
+        <div class="grow"><div class="t">${esc(m.epTitle)}</div><div class="s">${esc(m.text)}</div><div class="muted">${timeAgo(new Date(m.at).toISOString())}</div></div>
+        <button class="icon" data-del="${m.id}" aria-label="지우기">✕</button>
+      </div>`).join("") : '<p class="muted">아직 책갈피가 없어요. 본문에서 문단을 누르고 🔖 책갈피를 눌러 보세요.</p>';
+    d.querySelectorAll("[data-del]").forEach(b => b.onclick = e => {
+      e.stopPropagation();
+      const m = marks.items.find(x => x.id === b.dataset.del);
+      Object.assign(m, { del: true, at: Date.now() });
+      saveMarks();
+      paintMarks();
+      draw(d);
+    });
+    d.querySelectorAll("[data-go]").forEach(row => row.onclick = async () => {
+      const m = marks.items.find(x => x.id === row.dataset.go);
+      d.close();
+      const ep = m.epId === reader.epId ? state.ep[m.epId] : await loadEpisode(m.epId).catch(() => null);
+      const idx = markIndex(m, ep);
+      if (m.epId === reader.epId && $("#art")) { scrollToBlock(idx); const el = blockEl(idx); el?.classList.remove("flash"); void el?.offsetWidth; el?.classList.add("flash"); }
+      else location.hash = `/ep/${m.workId}/${m.epId}/${idx}`;
+    });
+  };
+  const d = openDialog(`<div class="stack"><h3>🔖 책갈피</h3><div id="mkList" class="mark-list"></div>
+    <div class="row end"><button class="btn primary" data-close>닫기</button></div></div>`);
+  draw(d);
+  pullMarks().then(() => { if (d.open) draw(d); });
+}
+
 /* ---------------- 회차 체크박스 (노션에 바로 저장) ---------------- */
 
 async function toggleCheck(workId, epId, prop, btn) {
@@ -1762,7 +1875,15 @@ async function toggleCheck(workId, epId, prop, btn) {
    앱에서 정하는 분류. Worker KV에 저장해서 기기끼리 같다. 노션은 건드리지 않는다.
 --------------------------------------------------- */
 
-let shelves = LS.get("nr.shelves", { list: [], of: {}, at: 0 });
+let shelves = normShelves(LS.get("nr.shelves", null));
+
+// 예전에는 작품마다 분류 하나(문자열)였다 → 배열로
+function normShelves(x) {
+  const out = { list: [], of: {}, at: 0, ...(x || {}) };
+  out.of = Object.fromEntries(Object.entries(out.of || {}).map(([id, v]) => [id, [].concat(v).filter(n => out.list.includes(n))]).filter(([, v]) => v.length));
+  return out;
+}
+const shelvesOf = id => shelves.of[id] || [];
 let lastWorks = null;
 
 async function pullShelves() {
@@ -1772,7 +1893,7 @@ async function pullShelves() {
       if ((r.shelves?.at || 0) < shelves.at) pushShelves();
       return false;
     }
-    shelves = { list: [], of: {}, ...r.shelves };
+    shelves = normShelves(r.shelves);
     LS.set("nr.shelves", shelves);
     return true;
   } catch { return false; }
@@ -1791,31 +1912,42 @@ async function pushShelves() {
 
 function openShelfPicker(workId, onDone) {
   const w = (lastWorks || []).find(x => x.id === workId);
-  const cur = shelves.of[workId] || "";
+  const sel = new Set(shelvesOf(workId));
   const d = openDialog(`
     <div class="stack">
       <h3>${esc(w?.title || "작품")} 분류</h3>
-      <div class="shelf-pick">
-        ${shelves.list.map(n => `<button class="chip ${cur === n ? "on" : ""}" data-s="${esc(n)}">${esc(n)}</button>`).join("")}
-        <button class="chip ${cur ? "" : "on"}" data-s="">분류 없음</button>
-      </div>
+      <p class="muted" style="margin:0">여러 개 고를 수 있어요.</p>
+      <div class="shelf-pick" id="shPick"></div>
       <div class="row"><input id="shNew" placeholder="새 분류 이름 (예: 연재 중)" maxlength="20"><button class="btn" id="shAdd">추가</button></div>
-      <div class="row end"><button class="btn primary" data-close>닫기</button></div>
+      <div class="row end"><button class="btn primary" id="shDone">완료</button></div>
     </div>`);
-  const pick = name => {
-    if (name) shelves.of[workId] = name; else delete shelves.of[workId];
-    saveShelvesLocal();
-    d.close();
-    onDone();
+  const draw = () => {
+    $("#shPick", d).innerHTML = shelves.list.length
+      ? shelves.list.map(n => `<button class="chip ${sel.has(n) ? "on" : ""}" data-s="${esc(n)}">${sel.has(n) ? "✓ " : ""}${esc(n)}</button>`).join("")
+      : '<span class="muted">아직 분류가 없어요. 아래에서 만들어 주세요.</span>';
+    d.querySelectorAll("[data-s]").forEach(b => b.onclick = () => {
+      const n = b.dataset.s;
+      sel.has(n) ? sel.delete(n) : sel.add(n);
+      draw();
+    });
   };
-  d.querySelectorAll("[data-s]").forEach(b => b.onclick = () => pick(b.dataset.s));
+  draw();
   $("#shAdd", d).onclick = () => {
     const name = $("#shNew", d).value.trim();
     if (!name) return;
     if (!shelves.list.includes(name)) shelves.list.push(name);
-    pick(name);
+    sel.add(name);
+    $("#shNew", d).value = "";
+    draw();
   };
   $("#shNew", d).onkeydown = e => { if (e.key === "Enter") $("#shAdd", d).click(); };
+  $("#shDone", d).onclick = () => {
+    const names = shelves.list.filter(n => sel.has(n));
+    if (names.length) shelves.of[workId] = names; else delete shelves.of[workId];
+    saveShelvesLocal();
+    d.close();
+    onDone();
+  };
 }
 
 function openShelfEditor(onDone) {
@@ -1851,9 +1983,9 @@ function openShelfEditor(onDone) {
     if (clean.some(n => !n)) return toast("빈 이름이 있어요");
     if (new Set(clean).size !== clean.length) return toast("같은 이름이 두 개 있어요");
     const of = {};
-    for (const [id, name] of Object.entries(shelves.of)) {
-      const i = items.findIndex(it => it.orig === name);
-      if (i >= 0) of[id] = clean[i];
+    for (const [id, names] of Object.entries(shelves.of)) {
+      const kept = [].concat(names).map(name => items.findIndex(it => it.orig === name)).filter(i => i >= 0).map(i => clean[i]);
+      if (kept.length) of[id] = [...new Set(kept)];
     }
     shelves.list = clean;
     shelves.of = of;
@@ -1934,6 +2066,7 @@ if ("serviceWorker" in navigator && location.protocol === "https:") navigator.se
 showLock().then(async () => {
   route();
   // 다른 기기에서 읽은 기록을 받아 오고, 목록 화면이면 다시 그린다
+  pullMarks();
   await pullProgress();
   if (!location.hash.startsWith("#/ep/") && cfg.apiBase) route();
 });

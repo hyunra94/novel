@@ -55,6 +55,10 @@ export default {
       if ((m = path.match(/^\/api\/pages\/([\w-]+)\/checkbox$/)) && method === "PATCH") {
         return json({ ok: true, ...(await setCheckbox(env, m[1], await readJson(request))) }, 200, cors);
       }
+      if (path === "/api/marks") {
+        if (method === "GET") return json({ ok: true, marks: await getMarks(env) }, 200, cors);
+        if (method === "PUT") return json({ ok: true, marks: await mergeMarks(env, await readJson(request)) }, 200, cors);
+      }
       if (path === "/api/shelves") {
         if (method === "GET") return json({ ok: true, shelves: await getShelves(env) }, 200, cors);
         if (method === "PUT") return json({ ok: true, shelves: await saveShelves(env, await readJson(request)) }, 200, cors);
@@ -219,11 +223,44 @@ async function getShelves(env) {
 async function saveShelves(env, body) {
   const list = [...new Set((Array.isArray(body?.list) ? body.list : []).map(x => String(x).trim().slice(0, 20)).filter(Boolean))].slice(0, 30);
   const of = {};
-  for (const [id, name] of Object.entries(body?.of || {})) {
-    if (/^[\w-]{1,40}$/.test(id) && list.includes(name)) of[id] = name;
+  for (const [id, names] of Object.entries(body?.of || {})) {
+    if (!/^[\w-]{1,40}$/.test(id)) continue;
+    const keep = [...new Set([].concat(names).filter(n => list.includes(n)))];
+    if (keep.length) of[id] = keep;
   }
   const data = { list, of, at: Number(body?.at) || Date.now() };
   await kv(env).put("shelves", JSON.stringify(data));
+  return data;
+}
+
+/* ---------------- 책갈피 (기기끼리 합치기) ----------------
+   { items: [{ id, workId, epId, blockId, i, text, epTitle, workTitle, at, del }] }
+   같은 id는 at이 늦은 쪽이 이긴다. 지운 책갈피는 del로 남겨서 다른 기기에서도 지워지게 한다.
+------------------------------------------------------------ */
+
+async function getMarks(env) {
+  return (await kv(env).get("marks", "json")) || { items: [] };
+}
+
+async function mergeMarks(env, body) {
+  const cur = await getMarks(env);
+  const map = new Map(cur.items.map(m => [m.id, m]));
+  const str = (v, n) => String(v ?? "").slice(0, n);
+  for (const m of Array.isArray(body?.items) ? body.items.slice(0, 1000) : []) {
+    if (!m || !/^[\w-]{4,40}$/.test(String(m.id))) continue;
+    const at = Number(m.at) || 0;
+    const old = map.get(m.id);
+    if (old && (old.at || 0) >= at) continue;
+    map.set(m.id, m.del ? { id: m.id, del: true, at } : {
+      id: m.id, workId: str(m.workId, 40), epId: str(m.epId, 40), blockId: str(m.blockId, 40), i: Number(m.i) || 0,
+      text: str(m.text, 120), epTitle: str(m.epTitle, 100), workTitle: str(m.workTitle, 100), at,
+    });
+  }
+  // 지운 표시는 90일 지나면 버린다
+  const cutoff = Date.now() - 90 * 864e5;
+  const items = [...map.values()].filter(m => !m.del || m.at > cutoff).sort((a, b) => b.at - a.at).slice(0, 1000);
+  const data = { items };
+  await kv(env).put("marks", JSON.stringify(data));
   return data;
 }
 
