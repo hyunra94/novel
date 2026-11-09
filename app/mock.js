@@ -47,19 +47,35 @@ const work = {
     { name: "하나", color: "pink" }, { name: "도윤", color: "brown" }, { name: "서진", color: "blue" },
   ],
   routes: [{ name: "본편", color: "gray" }, { name: "도윤 루트", color: "brown" }],
+  checks: ["체크박스"],
   episodes: [
-    { id: "e0", title: "프롤로그 | 빗소리", no: 0, route: "본편", status: "초안", summary: "비 오는 밤, 하나는 사 년 만에 그 집 계단을 오른다.", characters: ["하나", "도윤"], lastEdited: "2026-11-05T03:18:00.000Z" },
-    { id: "e1", title: "1화 | 다시, 처음", no: 1, route: "본편", status: "완료", summary: "병실에서 눈을 뜬 하나.", characters: ["하나", "서진"], lastEdited: "2026-11-05T03:32:00.000Z" },
-    { id: "e2", title: "2화 | (기획 중)", no: 2, route: "본편", status: "기획", summary: "", characters: [], lastEdited: "2026-11-05T03:32:00.000Z" },
+    { id: "e0", title: "프롤로그 | 빗소리", no: 0, route: "본편", status: "초안", summary: "비 오는 밤, 하나는 사 년 만에 그 집 계단을 오른다.", characters: ["하나", "도윤"], checks: { 체크박스: true }, lastEdited: "2026-11-05T03:18:00.000Z" },
+    { id: "e1", title: "1화 | 다시, 처음", no: 1, route: "본편", status: "완료", summary: "병실에서 눈을 뜬 하나.", characters: ["하나", "서진"], checks: { 체크박스: false }, lastEdited: "2026-11-05T03:32:00.000Z" },
+    { id: "e2", title: "2화 | (기획 중)", no: 2, route: "본편", status: "기획", summary: "", characters: [], checks: { 체크박스: false }, lastEdited: "2026-11-05T03:32:00.000Z" },
   ],
 };
+
+let mockShelves = { list: [], of: {}, at: 0 };
 
 export async function mockApi(path, opts = {}) {
   await new Promise(r => setTimeout(r, 120));
   const method = opts.method || "GET";
   let m;
   if (path === "/api/ping") return { ok: true, engines: { google: false, azure: false, elevenlabs: false } };
-  if (path === "/api/works") return { ok: true, works: [{ id: "w1", title: "예시 작품", icon: "🌧️", lastEdited: "2026-11-09T12:00:00.000Z" }] };
+  if (path === "/api/works") return { ok: true, works: [
+    { id: "w1", title: "예시 작품", icon: "🌧️", lastEdited: "2026-11-09T12:00:00.000Z" },
+    { id: "w2", title: "예시 작품 2", icon: "🌙", lastEdited: "2026-11-08T12:00:00.000Z" },
+    { id: "w3", title: "예시 작품 3", icon: "", lastEdited: "2026-11-01T12:00:00.000Z" },
+  ] };
+  if (path === "/api/shelves") {
+    if (method === "PUT") mockShelves = { ...opts.body };
+    return { ok: true, shelves: mockShelves };
+  }
+  if ((m = path.match(/^\/api\/pages\/(\w+)\/checkbox$/))) {
+    const ep = work.episodes.find(e => e.id === m[1]);
+    ep.checks[opts.body.prop] = opts.body.value;
+    return { ok: true, prop: opts.body.prop, value: opts.body.value };
+  }
   if (path === "/api/works/w1") return { ok: true, ...work };
   if ((m = path.match(/^\/api\/episodes\/(\w+)$/))) {
     const ep = episodes[m[1]];

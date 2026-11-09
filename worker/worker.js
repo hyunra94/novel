@@ -52,6 +52,13 @@ export default {
         if (method === "GET") return json({ ok: true, progress: await getProgress(env) }, 200, cors);
         if (method === "PUT") return json({ ok: true, progress: await mergeProgress(env, await readJson(request)) }, 200, cors);
       }
+      if ((m = path.match(/^\/api\/pages\/([\w-]+)\/checkbox$/)) && method === "PATCH") {
+        return json({ ok: true, ...(await setCheckbox(env, m[1], await readJson(request))) }, 200, cors);
+      }
+      if (path === "/api/shelves") {
+        if (method === "GET") return json({ ok: true, shelves: await getShelves(env) }, 200, cors);
+        if (method === "PUT") return json({ ok: true, shelves: await saveShelves(env, await readJson(request)) }, 200, cors);
+      }
       if (path === "/api/usage" && method === "GET") return json({ ok: true, usage: await getUsage(env) }, 200, cors);
       if (path === "/api/tts" && method === "POST") return json({ ok: true, ...(await tts(env, await readJson(request))) }, 200, cors);
       if ((m = path.match(/^\/api\/chunk\/([a-f0-9]{64})$/)) && method === "GET") return await getChunk(env, m[1], cors);
@@ -192,6 +199,34 @@ function readProp(props, name) {
 
 function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
+/* ---------------- 회차 체크박스 ---------------- */
+
+async function setCheckbox(env, pageId, body) {
+  const prop = String(body?.prop || "");
+  if (!prop || typeof body?.value !== "boolean") throw httpError(400, "prop, value가 필요해요.");
+  const page = await notion(env, `/pages/${pageId}`);
+  if (page.properties?.[prop]?.type !== "checkbox") throw httpError(400, "그 이름의 체크박스가 이 회차에 없어요.");
+  const updated = await notion(env, `/pages/${pageId}`, "PATCH", { properties: { [prop]: { checkbox: body.value } } });
+  return { prop, value: Boolean(updated.properties?.[prop]?.checkbox), lastEdited: updated.last_edited_time };
+}
+
+/* ---------------- 작품 분류 (앱에서 정하는 책장, KV) ---------------- */
+
+async function getShelves(env) {
+  return (await kv(env).get("shelves", "json")) || { list: [], of: {}, at: 0 };
+}
+
+async function saveShelves(env, body) {
+  const list = [...new Set((Array.isArray(body?.list) ? body.list : []).map(x => String(x).trim().slice(0, 20)).filter(Boolean))].slice(0, 30);
+  const of = {};
+  for (const [id, name] of Object.entries(body?.of || {})) {
+    if (/^[\w-]{1,40}$/.test(id) && list.includes(name)) of[id] = name;
+  }
+  const data = { list, of, at: Number(body?.at) || Date.now() };
+  await kv(env).put("shelves", JSON.stringify(data));
+  return data;
+}
+
 /* ---------------- 작품 · 회차 ---------------- */
 
 async function listWorks(env) {
@@ -214,6 +249,14 @@ async function listWorks(env) {
         lastEdited: p.last_edited_time,
       };
     });
+}
+
+function epNumber(value, title) {
+  if (typeof value === "number") return value;
+  const m = title.match(/(d+(?:.d+)?)s*화/);
+  if (m) return Number(m[1]);
+  if (/프롤로그/.test(title)) return 0;
+  return null;
 }
 
 function epProps(env) {
@@ -252,17 +295,23 @@ async function getWork(env, workId) {
   }
 
   const P = epProps(env);
+  // 회차 DB의 체크박스 속성(이름은 DB마다 다를 수 있음)
+  // 회차 번호 칸: "화"가 없으면 DB의 다른 숫자 칸(예: "숫자"), 그것도 없으면 제목의 "N화"
+  const dsProps = ds?.properties || {};
+  const noProp = dsProps[P.no]?.type === "number" ? P.no : Object.entries(dsProps).find(([, v]) => v?.type === "number")?.[0] || null;
+  const checks = Object.entries(ds?.properties || {}).filter(([, v]) => v?.type === "checkbox").map(([name]) => name);
   const pages = await notionQueryAll(env, dsId, {});
   const episodes = pages
     .filter(p => !p.in_trash && !p.archived)
     .map(p => ({
       id: p.id,
       title: readTitle(p.properties),
-      no: readProp(p.properties, P.no),
+      no: epNumber(noProp ? readProp(p.properties, noProp) : null, readTitle(p.properties)),
       route: readProp(p.properties, P.route) || "",
       status: readProp(p.properties, P.status) || "",
       summary: readProp(p.properties, P.summary) || "",
       characters: readProp(p.properties, P.chars) || [],
+      checks: Object.fromEntries(checks.map(name => [name, Boolean(p.properties?.[name]?.checkbox)])),
       lastEdited: p.last_edited_time,
     }))
     .sort((a, b) => {
@@ -275,7 +324,7 @@ async function getWork(env, workId) {
   const characters = (charProp?.multi_select?.options || []).map(o => ({ name: o.name, color: o.color }));
   const routeProp = ds?.properties?.[P.route];
   const routes = (routeProp?.select?.options || []).map(o => ({ name: o.name, color: o.color }));
-  return { workId, characters, routes, episodes };
+  return { workId, characters, routes, checks, episodes };
 }
 
 async function getEpisode(env, pageId) {

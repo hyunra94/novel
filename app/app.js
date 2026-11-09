@@ -220,19 +220,48 @@ async function viewWorks() {
   $("#goSettings").onclick = () => location.hash = "/settings";
 
   const render = works => {
+    if (works) lastWorks = works;
     const last = LS.get("nr.last", null);
     const cont = last ? `
       <div class="card link continue" data-go="#/ep/${last.workId}/${last.epId}">
         <div class="emoji">📖</div>
         <div class="grow"><div class="muted">이어 읽기</div><div class="name">${esc(last.workTitle)}</div><div class="muted">${esc(last.epTitle)}</div></div>
       </div>` : "";
-    const list = (works || []).map(w => `
+    const card = w => `
       <div class="card link" data-go="#/work/${w.id}">
         <div class="emoji">${esc(w.icon || "📘")}</div>
-        <div class="grow"><div class="name">${esc(w.title)}</div><div class="muted">${timeAgo(w.lastEdited)} 수정</div></div>
-      </div>`).join("");
-    view.innerHTML = cont + (works ? `<h2 class="sec">작품</h2>${list || '<div class="empty">작품이 없어요</div>'}` : '<div class="empty">불러오는 중…</div>');
-    view.querySelectorAll("[data-go]").forEach(el => el.onclick = () => location.hash = el.dataset.go.slice(1));
+        <div class="grow"><div class="name">${esc(w.title)}</div><div class="muted">${timeAgo(w.lastEdited)} 수정${shelves.of[w.id] ? ` · ${esc(shelves.of[w.id])}` : ""}</div></div>
+        <button class="icon more" data-more="${w.id}" aria-label="분류 정하기">⋯</button>
+      </div>`;
+    const all = works || [];
+    const NONE = "\u0000none";
+    let filter = LS.get("nr.shelfFilter", "전체");
+    if (filter !== "전체" && filter !== NONE && !shelves.list.includes(filter)) filter = "전체";
+    const inShelf = name => all.filter(w => (shelves.of[w.id] || NONE) === name);
+    const unsorted = inShelf(NONE);
+    const chips = `<div class="chips">
+      <button class="chip ${filter === "전체" ? "on" : ""}" data-f="전체">전체 ${all.length}</button>
+      ${shelves.list.map(n => `<button class="chip ${filter === n ? "on" : ""}" data-f="${esc(n)}">${esc(n)} ${inShelf(n).length}</button>`).join("")}
+      ${shelves.list.length && unsorted.length ? `<button class="chip ${filter === NONE ? "on" : ""}" data-f="${NONE}">분류 없음 ${unsorted.length}</button>` : ""}
+      <button class="chip add" id="shelfEdit">${shelves.list.length ? "✎ 분류 편집" : "＋ 분류 만들기"}</button>
+    </div>`;
+    let body;
+    if (!works) body = '<div class="empty">불러오는 중…</div>';
+    else if (!all.length) body = '<div class="empty">작품이 없어요</div>';
+    else if (filter !== "전체") body = inShelf(filter).map(card).join("") || '<div class="empty">이 분류에 작품이 없어요. 작품 오른쪽 ⋯로 넣어 보세요.</div>';
+    else if (!shelves.list.length) body = all.map(card).join("");
+    else body = [...shelves.list, NONE].map(n => {
+      const ws = inShelf(n);
+      return ws.length ? `<h2 class="sec">${n === NONE ? "분류 없음" : esc(n)}</h2>${ws.map(card).join("")}` : "";
+    }).join("");
+    view.innerHTML = cont + (works ? `<h2 class="sec">작품</h2>${chips}` : "") + body;
+    view.querySelectorAll("[data-go]").forEach(el => el.onclick = e => {
+      if (e.target.closest("[data-more]")) return;
+      location.hash = el.dataset.go.slice(1);
+    });
+    view.querySelectorAll("[data-more]").forEach(el => el.onclick = () => openShelfPicker(el.dataset.more, () => render(lastWorks)));
+    view.querySelectorAll("[data-f]").forEach(el => el.onclick = () => { LS.set("nr.shelfFilter", el.dataset.f); render(lastWorks); });
+    if ($("#shelfEdit")) $("#shelfEdit").onclick = () => openShelfEditor(() => render(lastWorks));
   };
 
   const fetchWorks = async () => {
@@ -241,10 +270,11 @@ async function viewWorks() {
     dataSet("works", r.works);
     if (location.hash.slice(1) === "/" || !location.hash) render(r.works);
   };
-  setRefresh(async () => { await fetchWorks(); toast("노션에서 새로 불러왔어요"); });
+  setRefresh(async () => { await Promise.all([fetchWorks(), pullShelves()]); render(lastWorks); toast("노션에서 새로 불러왔어요"); });
 
   render(state.works);
   if (!state.works) { const saved = await dataGet("works"); if (saved) render(saved); }
+  pullShelves().then(changed => { if (changed && (location.hash.slice(1) === "/" || !location.hash)) render(lastWorks); });
   try {
     await fetchWorks();
   } catch (e) {
@@ -359,6 +389,7 @@ async function viewWork(workId) {
         const isRead = read.has(e.id);
         const reading = !isRead && pct > 0;
         const isLast = lastEp && lastEp.id === e.id;
+        const cks = (work.checks || []).map(name => `<button class="ck ${e.checks?.[name] ? "on" : ""}" data-ck="${esc(name)}" data-ep="${e.id}" aria-label="${esc(name)}"><b></b>${(work.checks.length > 1 || name !== "체크박스") ? `<small>${esc(name)}</small>` : ""}</button>`).join("");
         return `<div class="ep ${isRead ? "read" : ""} ${reading ? "reading" : ""} ${isLast ? "here" : ""}" data-id="${e.id}">
           <div class="no">${typeof e.no === "number" ? e.no : "·"}${isRead ? '<small>✓</small>' : ""}</div>
           <div class="grow">
@@ -366,10 +397,14 @@ async function viewWork(workId) {
             ${e.summary ? `<div class="s">${esc(e.summary)}</div>` : ""}
             <div class="meta">${isLast ? '<span class="tag here">📖 여기까지 읽음</span>' : ""}${isRead ? '<span class="tag readtag">✓ 다 읽음</span>' : ""}${reading ? `<span class="tag readtag">${pct}% 읽음</span>` : ""}${e.route && e.route !== "본편" ? `<span class="tag">${esc(e.route)}</span>` : ""}${e.status ? `<span class="tag ${statusCls}">${esc(e.status)}</span>` : ""}</div>
             ${reading ? `<div class="bar-mini"><i style="width:${pct}%"></i></div>` : ""}
-          </div></div>`;
+          </div>${cks ? `<div class="cks">${cks}</div>` : ""}</div>`;
       }).join("") || '<div class="empty">회차가 없어요</div>'}</div>
       ${hidden ? `<p class="muted" style="text-align:center;margin-top:16px"><button class="btn small" id="togglePlanned">${prefs.hidePlanned ? `기획 중인 회차 ${hidden}개 보기` : "기획 중인 회차 숨기기"}</button></p>` : ""}`;
-    view.querySelectorAll(".ep").forEach(el => el.onclick = () => location.hash = `/ep/${workId}/${el.dataset.id}`);
+    view.querySelectorAll(".ep").forEach(el => el.onclick = e => {
+      if (e.target.closest("[data-ck]")) return;
+      location.hash = `/ep/${workId}/${el.dataset.id}`;
+    });
+    view.querySelectorAll("[data-ck]").forEach(b => b.onclick = e => { e.stopPropagation(); toggleCheck(workId, b.dataset.ep, b.dataset.ck, b); });
     view.querySelectorAll("[data-r]").forEach(el => el.onclick = () => { filter = el.dataset.r; LS.set(`nr.filter.${workId}`, filter); render(work); });
     if ($("#cont")) $("#cont").onclick = () => location.hash = `/ep/${workId}/${lastEp.id}`;
     if ($("#togglePlanned")) $("#togglePlanned").onclick = () => { prefs.hidePlanned = !prefs.hidePlanned; savePrefs(); render(work); };
@@ -487,6 +522,10 @@ function renderReader(work, ep, restore, keepBlock) {
       <h1>${esc(ep.title)}</h1>
       ${ep.blocks.map((b, i) => blockHtml(b, i, work)).join("")}
     </article>
+    ${(work?.checks || []).length ? `<div class="ep-checks">${work.checks.map(name => {
+      const on = work.episodes.find(e => e.id === ep.id)?.checks?.[name];
+      return `<button class="ck big ${on ? "on" : ""}" data-ck="${esc(name)}" data-ep="${ep.id}"><b></b><span>${esc(name)}</span></button>`;
+    }).join("")}</div>` : ""}
     <div class="ep-nav">
       <button class="btn" id="pPrev" ${prev ? "" : "disabled"}>◀ 이전 화</button>
       <button class="btn primary" id="pNext" ${next ? "" : "disabled"}>다음 화 ▶</button>
@@ -494,6 +533,7 @@ function renderReader(work, ep, restore, keepBlock) {
   if (prev) $("#pPrev").onclick = $("#tPrev").onclick = () => goEp("prev");
   if (next) $("#pNext").onclick = $("#tNext").onclick = () => goEp("next");
   $("#tList").onclick = () => goEp("list");
+  view.querySelectorAll(".ep-checks [data-ck]").forEach(b => b.onclick = () => toggleCheck(reader.workId, b.dataset.ep, b.dataset.ck, b));
   $("#art").onclick = onArticleTap;
 
   if (keepBlock != null) scrollToBlock(keepBlock, false);
@@ -1692,6 +1732,135 @@ async function installApp() {
         : "<p>브라우저 메뉴(⋮)에서 <b>앱 설치</b> 또는 <b>홈 화면에 추가</b>를 눌러 주세요.</p>"}
       <div class="row end"><button class="btn primary" data-close>확인</button></div>
     </div>`);
+}
+
+/* ---------------- 회차 체크박스 (노션에 바로 저장) ---------------- */
+
+async function toggleCheck(workId, epId, prop, btn) {
+  const work = state.work[workId];
+  const ep = work?.episodes.find(e => e.id === epId);
+  if (!ep) return;
+  const value = !ep.checks?.[prop];
+  const apply = v => {
+    ep.checks = { ...ep.checks, [prop]: v };
+    btn?.classList.toggle("on", v);
+    dataSet(`work:${workId}`, work);
+  };
+  apply(value);
+  btn && (btn.disabled = true);
+  try {
+    await api(`/api/pages/${epId}/checkbox`, { method: "PATCH", body: { prop, value } });
+  } catch (e) {
+    apply(!value);
+    toast(e.status === 403 || /permission|권한/i.test(e.message) ? "노션 통합에 '콘텐츠 업데이트' 권한이 필요해요" : e.message);
+  } finally {
+    btn && (btn.disabled = false);
+  }
+}
+
+/* ---------------- 작품 분류 (책장) ----------------
+   앱에서 정하는 분류. Worker KV에 저장해서 기기끼리 같다. 노션은 건드리지 않는다.
+--------------------------------------------------- */
+
+let shelves = LS.get("nr.shelves", { list: [], of: {}, at: 0 });
+let lastWorks = null;
+
+async function pullShelves() {
+  try {
+    const r = await api("/api/shelves");
+    if ((r.shelves?.at || 0) <= (shelves.at || 0) && shelves.at) {
+      if ((r.shelves?.at || 0) < shelves.at) pushShelves();
+      return false;
+    }
+    shelves = { list: [], of: {}, ...r.shelves };
+    LS.set("nr.shelves", shelves);
+    return true;
+  } catch { return false; }
+}
+
+function saveShelvesLocal() {
+  shelves.at = Date.now();
+  LS.set("nr.shelves", shelves);
+  pushShelves();
+}
+
+async function pushShelves() {
+  try { await api("/api/shelves", { method: "PUT", body: shelves }); }
+  catch (e) { if (!e.offline) toast(e.message); }
+}
+
+function openShelfPicker(workId, onDone) {
+  const w = (lastWorks || []).find(x => x.id === workId);
+  const cur = shelves.of[workId] || "";
+  const d = openDialog(`
+    <div class="stack">
+      <h3>${esc(w?.title || "작품")} 분류</h3>
+      <div class="shelf-pick">
+        ${shelves.list.map(n => `<button class="chip ${cur === n ? "on" : ""}" data-s="${esc(n)}">${esc(n)}</button>`).join("")}
+        <button class="chip ${cur ? "" : "on"}" data-s="">분류 없음</button>
+      </div>
+      <div class="row"><input id="shNew" placeholder="새 분류 이름 (예: 연재 중)" maxlength="20"><button class="btn" id="shAdd">추가</button></div>
+      <div class="row end"><button class="btn primary" data-close>닫기</button></div>
+    </div>`);
+  const pick = name => {
+    if (name) shelves.of[workId] = name; else delete shelves.of[workId];
+    saveShelvesLocal();
+    d.close();
+    onDone();
+  };
+  d.querySelectorAll("[data-s]").forEach(b => b.onclick = () => pick(b.dataset.s));
+  $("#shAdd", d).onclick = () => {
+    const name = $("#shNew", d).value.trim();
+    if (!name) return;
+    if (!shelves.list.includes(name)) shelves.list.push(name);
+    pick(name);
+  };
+  $("#shNew", d).onkeydown = e => { if (e.key === "Enter") $("#shAdd", d).click(); };
+}
+
+function openShelfEditor(onDone) {
+  // orig: 원래 이름 (이름을 바꿔도 그 분류에 넣어 둔 작품이 따라가게)
+  const items = shelves.list.map(n => ({ name: n, orig: n }));
+  const d = openDialog(`<div class="stack"><h3>분류 편집</h3><div id="shList"></div>
+    <div class="row"><input id="shNew" placeholder="새 분류 이름" maxlength="20"><button class="btn" id="shAdd">추가</button></div>
+    <p class="muted" style="margin:0">작품 목록에서 작품 오른쪽 ⋯를 누르면 분류를 정할 수 있어요. 노션은 바뀌지 않아요.</p>
+    <div class="row end"><button class="btn" data-close>취소</button><button class="btn primary" id="shSave">저장</button></div></div>`);
+  const draw = () => {
+    $("#shList", d).innerHTML = items.length ? items.map((it, i) => `
+      <div class="shelf-row">
+        <input value="${esc(it.name)}" data-i="${i}" maxlength="20">
+        <button class="icon" data-up="${i}" ${i ? "" : "disabled"} aria-label="위로">↑</button>
+        <button class="icon" data-down="${i}" ${i < items.length - 1 ? "" : "disabled"} aria-label="아래로">↓</button>
+        <button class="icon" data-del="${i}" aria-label="지우기">✕</button>
+      </div>`).join("") : '<p class="muted">아직 분류가 없어요.</p>';
+    d.querySelectorAll("#shList input").forEach(inp => inp.oninput = () => { items[inp.dataset.i].name = inp.value; });
+    d.querySelectorAll("[data-up]").forEach(b => b.onclick = () => { const i = +b.dataset.up; [items[i - 1], items[i]] = [items[i], items[i - 1]]; draw(); });
+    d.querySelectorAll("[data-down]").forEach(b => b.onclick = () => { const i = +b.dataset.down; [items[i + 1], items[i]] = [items[i], items[i + 1]]; draw(); });
+    d.querySelectorAll("[data-del]").forEach(b => b.onclick = () => { items.splice(+b.dataset.del, 1); draw(); });
+  };
+  draw();
+  $("#shAdd", d).onclick = () => {
+    const n = $("#shNew", d).value.trim();
+    if (n && !items.some(it => it.name === n)) items.push({ name: n, orig: null });
+    $("#shNew", d).value = "";
+    draw();
+  };
+  $("#shNew", d).onkeydown = e => { if (e.key === "Enter") $("#shAdd", d).click(); };
+  $("#shSave", d).onclick = () => {
+    const clean = items.map(it => String(it.name).trim().slice(0, 20));
+    if (clean.some(n => !n)) return toast("빈 이름이 있어요");
+    if (new Set(clean).size !== clean.length) return toast("같은 이름이 두 개 있어요");
+    const of = {};
+    for (const [id, name] of Object.entries(shelves.of)) {
+      const i = items.findIndex(it => it.orig === name);
+      if (i >= 0) of[id] = clean[i];
+    }
+    shelves.list = clean;
+    shelves.of = of;
+    saveShelvesLocal();
+    d.close();
+    onDone();
+  };
 }
 
 /* ---------------- 노션에서 새로 불러오기 ----------------

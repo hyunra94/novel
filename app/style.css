@@ -189,3 +189,23 @@ body.locked main, body.locked #player, body.locked #top, body.veil main, body.ve
 #ptr.spin span { animation: ptrspin .8s linear infinite; }
 @keyframes ptrspin { to { transform: rotate(360deg); } }
 body.refreshing #rfBtn, body.refreshing #rReload { animation: ptrspin .8s linear infinite; }
+
+/* ---------- 회차 체크박스 ---------- */
+.cks { display: flex; flex-direction: column; gap: 6px; flex: none; align-self: center; }
+.ck { border: 0; background: none; padding: 6px; display: flex; flex-direction: column; align-items: center; gap: 2px; color: var(--sub); font-family: var(--ui); }
+.ck b { width: 22px; height: 22px; border-radius: 6px; border: 2px solid var(--sub); display: grid; place-items: center; box-sizing: border-box; transition: background .12s; }
+.ck.on b { background: var(--accent); border-color: var(--accent); }
+.ck.on b::after { content: "✓"; color: #fff; font-size: 14px; font-weight: 800; line-height: 1; }
+.ck small { font-size: 10px; max-width: 56px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ck:disabled { opacity: .6; }
+.ep-checks { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; max-width: 680px; margin: 30px auto 0; padding: 0 16px; }
+.ck.big { flex-direction: row; gap: 8px; border: 1px solid var(--line); background: var(--card); border-radius: 12px; padding: 10px 16px; font-size: 14px; font-weight: 600; color: var(--text); }
+.ck.big.on { border-color: var(--accent); background: var(--accent-soft); }
+
+/* ---------- 작품 분류 ---------- */
+.card .more { flex: none; color: var(--sub); font-size: 20px; margin-right: -6px; }
+.chip.add { border-style: dashed; color: var(--sub); }
+.shelf-pick { display: flex; flex-wrap: wrap; gap: 8px; }
+.shelf-row { display: flex; gap: 4px; align-items: center; margin-bottom: 6px; }
+.shelf-row input { flex: 1; }
+.shelf-row .icon:disabled { opacity: .3; }
