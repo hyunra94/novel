@@ -159,6 +159,7 @@ function fmtTime(s) {
 
 window.addEventListener("hashchange", route);
 async function route() {
+  pageRefresh = null;
   hideBubble();
   $("#epinfo")?.classList.remove("show");
   $("#epnav")?.classList.remove("show");
@@ -215,7 +216,7 @@ function viewSetup() {
 /* ---------------- 작품 목록 ---------------- */
 
 async function viewWorks() {
-  setHeader("소설 서재", { actions: `<button class="icon" id="goSettings" aria-label="설정">⚙</button>` });
+  setHeader("소설 서재", { actions: `<button class="icon" id="rfBtn" aria-label="노션에서 새로 불러오기">⟳</button><button class="icon" id="goSettings" aria-label="설정">⚙</button>` });
   $("#goSettings").onclick = () => location.hash = "/settings";
 
   const render = works => {
@@ -234,13 +235,18 @@ async function viewWorks() {
     view.querySelectorAll("[data-go]").forEach(el => el.onclick = () => location.hash = el.dataset.go.slice(1));
   };
 
-  render(state.works);
-  if (!state.works) { const saved = await dataGet("works"); if (saved) render(saved); }
-  try {
+  const fetchWorks = async () => {
     const r = await api("/api/works");
     state.works = r.works;
     dataSet("works", r.works);
     if (location.hash.slice(1) === "/" || !location.hash) render(r.works);
+  };
+  setRefresh(async () => { await fetchWorks(); toast("노션에서 새로 불러왔어요"); });
+
+  render(state.works);
+  if (!state.works) { const saved = await dataGet("works"); if (saved) render(saved); }
+  try {
+    await fetchWorks();
   } catch (e) {
     if (!state.works) toast(e.message);
   }
@@ -259,7 +265,7 @@ async function loadWork(workId, { fresh = false } = {}) {
   return refreshWork(workId);
 }
 
-async function refreshWork(workId) {
+async function refreshWork(workId, { strict = false } = {}) {
   try {
     const r = await api(`/api/works/${workId}`);
     const title = (state.works || await dataGet("works") || []).find(w => w.id === workId);
@@ -268,7 +274,7 @@ async function refreshWork(workId) {
     dataSet(`work:${workId}`, work);
     return work;
   } catch (e) {
-    if (state.work[workId]) return state.work[workId];
+    if (state.work[workId] && !strict) return state.work[workId];
     throw e;
   }
 }
@@ -330,7 +336,7 @@ function epProgress(epId) {
 }
 
 async function viewWork(workId) {
-  setHeader("", { back: "/", actions: `<button class="icon" id="goVoices" aria-label="목소리">🎙</button>` });
+  setHeader("", { back: "/", actions: `<button class="icon" id="rfBtn" aria-label="노션에서 새로 불러오기">⟳</button><button class="icon" id="goVoices" aria-label="목소리">🎙</button>` });
   $("#goVoices").onclick = () => location.hash = `/voices/${workId}`;
   view.innerHTML = '<div class="empty">불러오는 중…</div>';
   let filter = LS.get(`nr.filter.${workId}`, "전체");
@@ -369,6 +375,11 @@ async function viewWork(workId) {
     if ($("#togglePlanned")) $("#togglePlanned").onclick = () => { prefs.hidePlanned = !prefs.hidePlanned; savePrefs(); render(work); };
   };
 
+  setRefresh(async () => {
+    const w = await refreshWork(workId, { strict: true });
+    if (location.hash.slice(1) === `/work/${workId}`) render(w);
+    toast(`노션에서 새로 불러왔어요 · ${w.episodes.length}화`);
+  });
   const work = await loadWork(workId);
   render(work);
   const fresh = await refreshWork(workId).catch(() => null);
@@ -434,13 +445,11 @@ async function viewReader(workId, epId) {
 
   $("#rLook").onclick = openLookPanel;
   $("#rListen").onclick = () => startListening(workId, epId, firstVisibleBlock());
-  $("#rReload").onclick = async () => {
-    try {
-      const fresh = await loadEpisode(epId, { fresh: true });
-      renderReader(work, fresh, false, firstVisibleBlock());
-      toast("노션에서 새로 불러왔어요");
-    } catch (e) { toast(e.message); }
-  };
+  setRefresh(async () => {
+    const fresh = await loadEpisode(epId, { fresh: true });
+    renderReader(work, fresh, false, firstVisibleBlock());
+    toast("노션에서 새로 불러왔어요");
+  }, "#rReload");
 
   const ctx = LS.get("nr.last", {});
   LS.set("nr.last", { ...ctx, workId, epId, workTitle: work?.title || "", epTitle: ep.title, at: Date.now() });
@@ -1684,6 +1693,69 @@ async function installApp() {
       <div class="row end"><button class="btn primary" data-close>확인</button></div>
     </div>`);
 }
+
+/* ---------------- 노션에서 새로 불러오기 ----------------
+   목록·본문은 저장본을 먼저 보여 주고 뒤에서 조용히 새로 받는다.
+   ⟳ 버튼이나 맨 위에서 아래로 당기면 지금 바로 노션에서 다시 받는다.
+---------------------------------------------------------- */
+
+let pageRefresh = null;
+let refreshing = false;
+
+function setRefresh(fn, btnSel = "#rfBtn") {
+  pageRefresh = fn;
+  const btn = $(btnSel);
+  if (btn) btn.onclick = runRefresh;
+}
+
+async function runRefresh() {
+  if (!pageRefresh || refreshing) return;
+  const fn = pageRefresh;
+  refreshing = true;
+  document.body.classList.add("refreshing");
+  ptrEl().classList.add("spin");
+  try { await fn(); }
+  catch (e) { toast(e.message || "불러오지 못했어요"); }
+  finally {
+    refreshing = false;
+    document.body.classList.remove("refreshing");
+    ptrEl().classList.remove("spin");
+  }
+}
+
+function ptrEl() {
+  let el = $("#ptr");
+  if (!el) { el = document.createElement("div"); el.id = "ptr"; el.innerHTML = "<span>⟳</span>"; document.body.appendChild(el); }
+  return el;
+}
+
+const PTR_GO = 80;
+let ptr = null;
+document.addEventListener("touchstart", e => {
+  if (!pageRefresh || refreshing || window.scrollY > 0 || e.touches.length !== 1) return;
+  if (document.body.classList.contains("locked") || document.querySelector("dialog[open], #pinsheet")) return;
+  ptr = { y: e.touches[0].clientY, d: 0 };
+}, { passive: true });
+document.addEventListener("touchmove", e => {
+  if (!ptr) return;
+  ptr.d = window.scrollY > 0 ? 0 : Math.max(0, e.touches[0].clientY - ptr.y);
+  const el = ptrEl();
+  const d = Math.min(ptr.d, 130);
+  el.style.setProperty("--pull", `${d * 0.6}px`);
+  el.style.setProperty("--turn", `${d * 3}deg`);
+  el.classList.toggle("pulling", d > 4);
+  el.classList.toggle("ready", ptr.d > PTR_GO);
+}, { passive: true });
+document.addEventListener("touchend", () => {
+  if (!ptr) return;
+  const go = ptr.d > PTR_GO && window.scrollY <= 0;
+  ptr = null;
+  const el = ptrEl();
+  el.classList.remove("pulling", "ready");
+  el.style.removeProperty("--pull");
+  el.style.removeProperty("--turn");
+  if (go) { navigator.vibrate?.(15); runRefresh(); }
+});
 
 /* ---------------- 시작 ---------------- */
 

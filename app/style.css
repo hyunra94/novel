@@ -177,3 +177,15 @@ body.locked main, body.locked #player, body.locked #top, body.veil main, body.ve
 #epnav button { border: 0; background: none; color: var(--bg); padding: 11px 14px; border-radius: 10px; font-size: 14px; font-weight: 600; white-space: nowrap; }
 #epnav button:active { background: rgba(255,255,255,.15); }
 #epnav button:disabled { opacity: .35; }
+
+/* ---------- 노션에서 새로 불러오기 ---------- */
+#ptr { position: fixed; left: 50%; top: calc(14px + env(safe-area-inset-top)); z-index: 30; width: 38px; height: 38px; margin-left: -19px; border-radius: 50%;
+  display: grid; place-items: center; background: var(--card); color: var(--accent); box-shadow: 0 3px 12px rgba(0,0,0,.18); font-size: 20px; font-weight: 700;
+  opacity: 0; pointer-events: none; transform: translateY(calc(var(--pull, 0px) - 60px)); transition: opacity .15s; }
+#ptr span { display: block; transform: rotate(var(--turn, 0deg)); }
+#ptr.pulling { opacity: .75; transition: none; }
+#ptr.ready { opacity: 1; background: var(--accent); color: #fff; }
+#ptr.spin { opacity: 1; transform: translateY(50px); transition: transform .2s; }
+#ptr.spin span { animation: ptrspin .8s linear infinite; }
+@keyframes ptrspin { to { transform: rotate(360deg); } }
+body.refreshing #rfBtn, body.refreshing #rReload { animation: ptrspin .8s linear infinite; }
