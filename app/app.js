@@ -109,7 +109,7 @@ function setHeader(title, { back = null, actions = "" } = {}) {
   $("#title").textContent = title;
   const b = $("#back");
   b.style.visibility = back ? "visible" : "hidden";
-  b.onclick = () => { if (back) location.hash = back; };
+  b.onclick = () => { if (back) goUp(back); };
   $("#actions").innerHTML = actions;
   $("#top").classList.remove("hide");
   setProgress(0);
@@ -158,7 +158,52 @@ function fmtTime(s) {
 /* ---------------- 라우팅 ---------------- */
 
 window.addEventListener("hashchange", route);
+
+/* ---------- 뒤로 가기 ----------
+   회차끼리 이동(이전·다음 화, 자동 다음 화, 책갈피)은 기록을 쌓지 않고 바꿔치기한다.
+   그래서 뒤로 가기(휴대폰 뒤로 버튼, ‹)를 누르면 거쳐 온 회차들이 아니라 회차 목록 → 메인으로 나간다.
+---------------------------------- */
+const navStack = [];
+let navReplace = false;
+const curHash = () => location.hash || "#/";
+
+function trackNav() {
+  const h = curHash();
+  if (navReplace) { navReplace = false; navStack[Math.max(0, navStack.length - 1)] = h; return; }
+  if (navStack[navStack.length - 2] === h) { navStack.pop(); return; }
+  if (navStack[navStack.length - 1] !== h) navStack.push(h);
+}
+
+function go(path, { replace = false } = {}) {
+  if (replace) { navReplace = true; location.replace(`#${path}`); }
+  else location.hash = path;
+}
+
+// 위 화면으로: 바로 앞 기록이 그 화면이면 진짜 뒤로 가기, 아니면 바꿔치기
+function goUp(path) {
+  if (navStack[navStack.length - 2] === `#${path}`) history.back();
+  else go(path, { replace: true });
+}
+
+const onEpRoute = () => curHash().startsWith("#/ep/");
+
+// 앱을 회차 화면에서 바로 열었을 때도 뒤로 가기가 목록 → 메인으로 가게 기록을 깔아 둔다
+(function seedHistory() {
+  const h0 = location.hash;
+  const p = h0.slice(1).split("/").filter(Boolean);
+  // 새로 고침할 때마다 기록을 또 깔지 않게, 이 창에서 한 번만
+  if (!p.length || p[0] === "setup" || sessionStorage.getItem("nr.seeded")) return;
+  sessionStorage.setItem("nr.seeded", "1");
+  history.replaceState(null, "", "#/");
+  navStack.push("#/");
+  if (p[0] === "ep" && p[1]) {
+    history.pushState(null, "", `#/work/${p[1]}`);
+    navStack.push(`#/work/${p[1]}`);
+  }
+  history.pushState(null, "", h0);
+})();
 async function route() {
+  trackNav();
   pageRefresh = null;
   hideBubble();
   $("#epinfo")?.classList.remove("show");
@@ -257,7 +302,11 @@ async function viewWorks() {
     view.innerHTML = cont + (works ? `<h2 class="sec">작품</h2>${chips}` : "") + body;
     view.querySelectorAll("[data-go]").forEach(el => el.onclick = e => {
       if (e.target.closest("[data-more]")) return;
-      location.hash = el.dataset.go.slice(1);
+      const p = el.dataset.go.slice(1);
+      const m = p.match(/^\/ep\/([^/]+)\//);
+      // 메인에서 바로 회차로 가도 뒤로 가기는 그 작품 회차 목록(상위)으로
+      if (m) { history.pushState(null, "", `#/work/${m[1]}`); navStack.push(`#/work/${m[1]}`); }
+      location.hash = p;
     });
     view.querySelectorAll("[data-more]").forEach(el => el.onclick = () => openShelfPicker(el.dataset.more, () => render(lastWorks)));
     view.querySelectorAll("[data-f]").forEach(el => el.onclick = () => { LS.set("nr.shelfFilter", el.dataset.f); render(lastWorks); });
@@ -477,7 +526,7 @@ async function viewReader(workId, epId, jumpBlock = null) {
   const work = await loadWork(workId).catch(() => null);
   let ep = await loadEpisode(epId);
   renderReader(work, ep, jumpBlock == null, jumpBlock);
-  if (jumpBlock != null) { blockEl(jumpBlock)?.classList.add("flash"); history.replaceState(null, "", `#/ep/${workId}/${epId}`); }
+  if (jumpBlock != null) { blockEl(jumpBlock)?.classList.add("flash"); history.replaceState(null, "", `#/ep/${workId}/${epId}`); navStack[navStack.length - 1] = curHash(); }
   $("#rMarks").onclick = () => openMarksDialog(workId);
   setTimeout(() => { if (reader.epId === epId) saveReadPos(); }, 600);
 
@@ -647,8 +696,8 @@ function showEpInfo() {
 }
 
 function goEp(where) {
-  if (where === "list") location.hash = `/work/${reader.workId}`;
-  else if (reader[where]) location.hash = `/ep/${reader.workId}/${reader[where].id}`;
+  if (where === "list") goUp(`/work/${reader.workId}`);
+  else if (reader[where]) go(`/ep/${reader.workId}/${reader[where].id}`, { replace: true });
 }
 
 // 본문을 누르면 아래쪽에 "이전 화 · 목록 · 다음 화"가 잠깐 뜬다
@@ -1224,7 +1273,7 @@ function onEpisodeEnd() {
   if (player.sleepEp) { player.sleepEp = false; setStatus("⏾ 이 화까지 듣고 멈췄어요"); return; }
   const next = prefs.autoNext ? nextEpisodeOf(workId, epId) : null;
   if (!next) { setStatus("끝까지 들었어요"); return; }
-  if (reader.epId === epId) location.hash = `/ep/${workId}/${next.id}`;
+  if (reader.epId === epId) go(`/ep/${workId}/${next.id}`, { replace: true });
   startListening(workId, next.id, 0);
 }
 
@@ -1294,7 +1343,7 @@ $(".pl-bar").onclick = e => {
 };
 $(".pl-info").onclick = e => {
   if (e.target.closest(".pl-bar")) return;
-  if (player.epId && reader.epId !== player.epId) location.hash = `/ep/${player.workId}/${player.epId}`;
+  if (player.epId && reader.epId !== player.epId) go(`/ep/${player.workId}/${player.epId}`, { replace: onEpRoute() });
   else if (player.curBlock >= 0) { userScrolledAt = 0; scrollToBlock(player.curBlock); }
 };
 $("#plMore").onclick = () => {
@@ -1844,7 +1893,7 @@ function openMarksDialog(workId) {
       const ep = m.epId === reader.epId ? state.ep[m.epId] : await loadEpisode(m.epId).catch(() => null);
       const idx = markIndex(m, ep);
       if (m.epId === reader.epId && $("#art")) { scrollToBlock(idx); const el = blockEl(idx); el?.classList.remove("flash"); void el?.offsetWidth; el?.classList.add("flash"); }
-      else location.hash = `/ep/${m.workId}/${m.epId}/${idx}`;
+      else go(`/ep/${m.workId}/${m.epId}/${idx}`, { replace: onEpRoute() });
     });
   };
   const d = openDialog(`<div class="stack"><h3>🔖 책갈피</h3><div id="mkList" class="mark-list"></div>
