@@ -362,7 +362,7 @@ async function pullProgress() {
 
 function epProgress(epId) {
   const p = LS.get(`nr.pos.${epId}`, null);
-  return p?.pct || 0;
+  return p ? p.pct || 0 : null; // null = 한 번도 안 연 회차
 }
 
 async function viewWork(workId) {
@@ -386,9 +386,8 @@ async function viewWork(workId) {
       ${routes.length > 2 ? `<div class="chips">${routes.map(r => `<button class="chip ${r === filter ? "on" : ""}" data-r="${esc(r)}">${esc(r)}</button>`).join("")}</div>` : ""}
       <div>${eps.map(e => {
         const pct = epProgress(e.id);
-        const statusCls = e.status === "완료" ? "done" : e.status === "초안" ? "draft" : "";
         const isRead = read.has(e.id);
-        const reading = !isRead && pct > 0;
+        const reading = !isRead && pct != null;
         const isLast = lastEp && lastEp.id === e.id;
         const cks = (work.checks || []).map(name => `<button class="ck ${e.checks?.[name] ? "on" : ""}" data-ck="${esc(name)}" data-ep="${e.id}" aria-label="${esc(name)}"><b></b>${(work.checks.length > 1 || name !== "체크박스") ? `<small>${esc(name)}</small>` : ""}</button>`).join("");
         return `<div class="ep ${isRead ? "read" : ""} ${reading ? "reading" : ""} ${isLast ? "here" : ""}" data-id="${e.id}">
@@ -396,7 +395,7 @@ async function viewWork(workId) {
           <div class="grow">
             <div class="t">${esc(e.title)}</div>
             ${e.summary ? `<div class="s">${esc(e.summary)}</div>` : ""}
-            <div class="meta">${isLast ? '<span class="tag here">📖 여기까지 읽음</span>' : ""}${isRead ? '<span class="tag readtag">✓ 다 읽음</span>' : ""}${reading ? `<span class="tag readtag">${pct}% 읽음</span>` : ""}${e.route && e.route !== "본편" ? `<span class="tag">${esc(e.route)}</span>` : ""}${e.status ? `<span class="tag ${statusCls}">${esc(e.status)}</span>` : ""}</div>
+            <div class="meta">${isLast ? '<span class="tag here">📖 여기까지 읽음</span>' : ""}${isRead ? '<span class="tag readtag">✓ 다 읽음</span>' : ""}${reading ? `<span class="tag readtag">${pct ? `${pct}% 읽음` : "열어 봄"}</span>` : ""}${e.route && e.route !== "본편" ? `<span class="tag">${esc(e.route)}</span>` : ""}</div>
             ${reading ? `<div class="bar-mini"><i style="width:${pct}%"></i></div>` : ""}
           </div>${cks ? `<div class="cks">${cks}</div>` : ""}</div>`;
       }).join("") || '<div class="empty">회차가 없어요</div>'}</div>
@@ -480,6 +479,7 @@ async function viewReader(workId, epId, jumpBlock = null) {
   renderReader(work, ep, jumpBlock == null, jumpBlock);
   if (jumpBlock != null) { blockEl(jumpBlock)?.classList.add("flash"); history.replaceState(null, "", `#/ep/${workId}/${epId}`); }
   $("#rMarks").onclick = () => openMarksDialog(workId);
+  setTimeout(() => { if (reader.epId === epId) saveReadPos(); }, 600);
 
   $("#rLook").onclick = openLookPanel;
   $("#rListen").onclick = () => startListening(workId, epId, firstVisibleBlock());
@@ -563,6 +563,18 @@ function firstVisibleBlock() {
   return 0;
 }
 
+// 읽은 위치 저장. 한 번 연 회차는 스크롤하지 않아도 "몇 % 읽음"이 남는다.
+// 퍼센트는 지금까지 가장 많이 읽은 값을 남기고(위로 다시 올려도 줄지 않게), 위치는 지금 위치.
+function saveReadPos() {
+  if (!$("#art") || !reader.epId) return;
+  const max = document.documentElement.scrollHeight - window.innerHeight;
+  const pct = Math.round(max > 0 ? (window.scrollY / max) * 100 : 100);
+  const prev = LS.get(`nr.pos.${reader.epId}`, {});
+  LS.set(`nr.pos.${reader.epId}`, { ...prev, block: firstVisibleBlock(), pct: Math.max(pct, prev.pct || 0), at: Date.now() });
+  if (pct > 97) markRead(reader.epId);
+  queueSync();
+}
+
 // 스크롤: 읽은 위치 저장, 진행 막대, 위쪽 바 숨기기
 let lastY = 0;
 window.addEventListener("scroll", () => {
@@ -579,13 +591,7 @@ window.addEventListener("scroll", () => {
   hideBubble();
   userScrolledAt = Date.now();
   clearTimeout(reader.saveTimer);
-  reader.saveTimer = setTimeout(() => {
-    if (!$("#art")) return;
-    const prev = LS.get(`nr.pos.${reader.epId}`, {});
-    LS.set(`nr.pos.${reader.epId}`, { ...prev, block: firstVisibleBlock(), pct: Math.round(pct), at: Date.now() });
-    if (pct > 97) markRead(reader.epId);
-    queueSync();
-  }, 400);
+  reader.saveTimer = setTimeout(saveReadPos, 400);
 }, { passive: true });
 
 /* ---------------- 글자 설정 ---------------- */
