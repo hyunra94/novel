@@ -2068,7 +2068,20 @@ document.addEventListener("touchend", () => {
 
 applyLook();
 document.addEventListener("click", e => { if (!e.target.closest("#bubble") && !e.target.closest("#art")) hideBubble(); });
-if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
+if ("serviceWorker" in navigator && location.protocol === "https:") {
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+  // 새 버전이 올라오면 바로 새로 열어서 옛 화면이 남지 않게 (듣는 중이면 멈춘 뒤에)
+  const hadController = Boolean(navigator.serviceWorker.controller);
+  let updateReady = false;
+  const reloadIfIdle = () => { if (updateReady && !isPlaying() && !document.querySelector("dialog[open]")) location.reload(); };
+  navigator.serviceWorker.addEventListener("controllerchange", () => { if (hadController) { updateReady = true; reloadIfIdle(); } });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    navigator.serviceWorker.getRegistration().then(r => r?.update()).catch(() => {});
+    reloadIfIdle();
+  });
+  window.addEventListener("hashchange", reloadIfIdle);
+}
 showLock().then(async () => {
   route();
   // 다른 기기에서 읽은 기록을 받아 오고, 목록 화면이면 다시 그린다
