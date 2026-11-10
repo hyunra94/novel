@@ -228,3 +228,6 @@ body.refreshing #rfBtn, body.refreshing #rReload { animation: ptrspin .8s linear
 /* 두 번 탭 확대를 막고, 아이폰에서 입력칸을 누를 때 저절로 확대되지 않게 글자를 16px 이상으로 */
 html, body { touch-action: pan-x pan-y; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 input, select, textarea { font-size: max(16px, 1em); }
+
+/* ---------- 예시 모드 ---------- */
+.card.mock-bar { display: flex; align-items: center; gap: 12px; border: 1px dashed var(--accent); }

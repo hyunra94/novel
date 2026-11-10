@@ -210,7 +210,7 @@ async function route() {
   $("#epnav")?.classList.remove("show");
   const parts = (location.hash.slice(1) || "/").split("/").filter(Boolean).map(decodeURIComponent);
   window.scrollTo(0, 0);
-  if (!cfg.apiBase) return viewSetup();
+  if (!cfg.apiBase || parts[0] === "setup") return viewSetup();
   try {
     if (!parts.length) return await viewWorks();
     if (parts[0] === "work") return await viewWork(parts[1]);
@@ -225,14 +225,32 @@ async function route() {
 
 /* ---------------- 처음 연결 ---------------- */
 
+// 연결 바꾸기·예시로 둘러보기를 눌러도 원래 연결(앱 키)은 nr.cfgPrev에 남겨 두고, 취소·예시 끝내기로 돌아간다
+const realCfg = () => (cfg.apiBase && cfg.apiBase !== "mock" ? cfg : LS.get("nr.cfgPrev", null)) || { apiBase: "", apiKey: "" };
+function useCfg(next) {
+  cfg = next;
+  LS.set("nr.cfg", cfg);
+  LS.del("nr.cfgPrev");
+  state.works = null; state.work = {}; state.ep = {};
+  location.replace("#/");
+  route();
+}
+
+function exitMock() {
+  const prev = LS.get("nr.cfgPrev", null);
+  if (prev?.apiBase && prev.apiKey) useCfg(prev);
+  else go("/setup");
+}
+
 function viewSetup() {
-  setHeader("소설 서재");
+  const was = realCfg();
+  setHeader("소설 서재", cfg.apiBase ? { back: "/" } : {});
   view.innerHTML = `
     <div class="card stack" style="margin-top:20px">
       <h3 style="margin:0">연결하기</h3>
       <p class="muted">Worker 주소와 앱 키(APP_KEY)를 넣어 주세요. 한 번만 넣으면 이 기기에 저장돼요.</p>
-      <div class="field"><label>Worker 주소</label><input id="sBase" placeholder="https://novelreader.○○○.workers.dev" value="${esc(cfg.apiBase && cfg.apiBase !== "mock" ? cfg.apiBase : DEFAULT_API)}"></div>
-      <div class="field" style="margin-top:10px"><label>앱 키</label><input id="sKey" type="password" value="${esc(cfg.apiKey)}"></div>
+      <div class="field"><label>Worker 주소</label><input id="sBase" placeholder="https://novelreader.○○○.workers.dev" value="${esc(was.apiBase || DEFAULT_API)}"></div>
+      <div class="field" style="margin-top:10px"><label>앱 키</label><input id="sKey" type="password" value="${esc(was.apiKey || "")}"></div>
       <div class="row end" style="margin-top:14px">
         <button class="btn" id="sMock">예시로 둘러보기</button>
         <button class="btn primary" id="sGo">연결</button>
@@ -246,16 +264,21 @@ function viewSetup() {
     try {
       const r = await api("/api/ping");
       state.engines = r.engines;
-      LS.set("nr.cfg", cfg);
       toast("연결됐어요");
-      location.hash = "/";
-      route();
+      useCfg(next);
     } catch (e) {
       cfg = prev;
       toast(e.message, 4000);
     }
   };
-  $("#sMock").onclick = () => { cfg = { apiBase: "mock", apiKey: "" }; LS.set("nr.cfg", cfg); location.hash = "/"; route(); };
+  $("#sMock").onclick = () => {
+    if (cfg.apiBase && cfg.apiBase !== "mock") LS.set("nr.cfgPrev", cfg);
+    cfg = { apiBase: "mock", apiKey: "" };
+    LS.set("nr.cfg", cfg);
+    state.works = null; state.work = {}; state.ep = {};
+    location.replace("#/");
+    route();
+  };
 }
 
 /* ---------------- 작품 목록 ---------------- */
@@ -299,7 +322,9 @@ async function viewWorks() {
       const ws = inShelf(n);
       return ws.length ? `<h2 class="sec">${n === NONE ? "분류 없음" : esc(n)}</h2>${ws.map(card).join("")}` : "";
     }).join("");
-    view.innerHTML = cont + (works ? `<h2 class="sec">작품</h2>${chips}` : "") + body;
+    const mockBar = cfg.apiBase === "mock" ? `<div class="card mock-bar"><div class="grow"><b>예시로 둘러보는 중</b><div class="muted">진짜 소설이 아니에요</div></div><button class="btn primary small" id="mockExit">예시 끝내기</button></div>` : "";
+    view.innerHTML = mockBar + cont + (works ? `<h2 class="sec">작품</h2>${chips}` : "") + body;
+    $("#mockExit")?.addEventListener("click", exitMock);
     view.querySelectorAll("[data-go]").forEach(el => el.onclick = e => {
       if (e.target.closest("[data-more]")) return;
       const p = el.dataset.go.slice(1);
@@ -1537,7 +1562,7 @@ function viewSettings() {
     <h2 class="sec">연결</h2>
     <div class="card">
       <div class="muted">${cfg.apiBase === "mock" ? "예시 데이터로 보는 중" : esc(cfg.apiBase)}</div>
-      <div class="row" style="margin-top:10px"><button class="btn small" id="stRe">연결 바꾸기</button></div>
+      <div class="row" style="margin-top:10px"><button class="btn small" id="stRe">${cfg.apiBase === "mock" ? "예시 끝내기" : "연결 바꾸기"}</button></div>
     </div>
     <h2 class="sec">앱 잠금</h2>
     <div class="card">
@@ -1558,7 +1583,7 @@ function viewSettings() {
     </div>
     <h2 class="sec">사용량</h2>
     <div class="card" id="stUsage"><p class="muted">불러오는 중…</p></div>`;
-  $("#stRe").onclick = () => { cfg = { apiBase: "", apiKey: "" }; LS.set("nr.cfg", cfg); state.works = null; state.work = {}; state.ep = {}; route(); };
+  $("#stRe").onclick = () => cfg.apiBase === "mock" ? exitMock() : go("/setup");
   $("#stClearAudio").onclick = async () => {
     await caches.delete("nr-audio"); await caches.delete("nr-chunks");
     Object.keys(localStorage).filter(k => k.startsWith("nr.am.")).forEach(k => localStorage.removeItem(k));
