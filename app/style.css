@@ -235,3 +235,5 @@ input, select, textarea { font-size: max(16px, 1em); }
 /* ---------- 목소리 프리셋 ---------- */
 .preset-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
 .preset-row:last-child { border-bottom: 0; }
+.preset-row.on b { color: var(--accent); }
+.preset-row .btn.small { white-space: nowrap; }

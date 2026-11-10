@@ -1482,7 +1482,11 @@ async function viewVoices(workId) {
     { key: "dialogue", name: "그 밖의 인물 대사", hint: "비워 두면 서술 목소리" },
     { key: "fallback", name: "대사가 거절됐을 때", hint: "ElevenLabs가 거절한 줄만 이 목소리로 (비워 두면 서술 목소리)" },
   ];
-  const getV = key => key.startsWith("c:") ? vs.characters?.[key.slice(2)] : vs[key];
+  let loaded = null; // 화면에 불러온 프리셋
+  const getV = key => {
+    const src = loaded ? { narrator: loaded.narrator, dialogue: loaded.dialogue, fallback: vs.fallback, characters: loaded.characters } : vs;
+    return key.startsWith("c:") ? src.characters?.[key.slice(2)] : src[key];
+  };
 
   const usageHtml = await usageBlock().catch(() => "");
   const cloudHtml = available.length ? `
@@ -1504,7 +1508,8 @@ async function viewVoices(workId) {
     <h2 class="sec">목소리 프리셋 · 모든 작품</h2>
     <div class="card">
       <p class="muted" style="margin-top:0">위에서 고른 목소리(비워 둔 인물은 공통 목소리)를 이름 붙여 저장해 두고, 듣기 설정(⋯)에서 바꿔 끼워요.</p>
-      <div class="preset-list">${presets.list.map(p => `<div class="preset-row" data-id="${esc(p.id)}"><div class="grow"><b>${esc(p.name)}</b><div class="muted">서술 ${esc(p.narrator?.label || "작품 설정")} · 인물 ${Object.keys(p.characters || {}).length}명${prefs.preset === p.id ? " · 지금 쓰는 중" : ""}</div></div><button class="icon" data-del="${esc(p.id)}" aria-label="지우기">✕</button></div>`).join("") || '<p class="muted">아직 없어요</p>'}</div>
+      <div class="preset-list">${presets.list.map(p => `<div class="preset-row${prefs.preset === p.id ? " on" : ""}" data-id="${esc(p.id)}"><div class="grow"><b>${esc(p.name)}</b><div class="muted">서술 ${esc(p.narrator?.label || "작품 설정")} · 인물 ${Object.keys(p.characters || {}).length}명</div></div><button class="btn small" data-use="${esc(p.id)}">${prefs.preset === p.id ? "쓰는 중 ✓" : "쓰기"}</button><button class="btn small" data-load="${esc(p.id)}">불러오기</button><button class="icon" data-del="${esc(p.id)}" aria-label="지우기">✕</button></div>`).join("") || '<p class="muted">아직 없어요</p>'}</div>
+      <p class="muted" style="margin:8px 0 0"><b>쓰기</b>: 모든 작품을 이 프리셋 목소리로 들어요 (한 번 더 누르면 작품 설정으로). <b>불러오기</b>: 위 칸에 채워서 고친 뒤 같은 이름으로 저장하면 덮어써요.</p>
       <div class="row end" style="margin-top:10px"><button class="btn" id="vsPreset">지금 설정을 프리셋으로 저장</button></div>
     </div>` : `
     <h2 class="sec">클라우드 음성</h2>
@@ -1586,15 +1591,37 @@ async function viewVoices(workId) {
       if (k.startsWith("c:")) { if (v) p.characters[k.slice(2)] = v; } else if (k === "narrator" || k === "dialogue") p[k] = v;
     }
     if (!p.narrator) return toast("서술 목소리를 먼저 골라 주세요.");
-    openDialog(`<div class="stack"><h3>프리셋 이름</h3><input id="psName" maxlength="20" placeholder="예: 구글, 남/여"><div class="row end"><button class="btn" data-close>취소</button><button class="btn primary" id="psOk">저장</button></div></div>`, d => {
+    openDialog(`<div class="stack"><h3>프리셋 이름</h3><input id="psName" maxlength="20" placeholder="예: 구글, 남/여" value="${esc(loaded?.name || "")}"><div class="row end"><button class="btn" data-close>취소</button><button class="btn primary" id="psOk">저장</button></div></div>`, d => {
       $("#psOk", d).onclick = async () => {
         const name = $("#psName", d).value.trim();
         if (!name) return toast("이름을 넣어 주세요.");
-        const list = presets.list.filter(x => x.name !== name);
-        try { await pushPresets({ list: [...list, { id: crypto.randomUUID(), name, ...p }] }); d.close(); toast(`"${name}" 프리셋을 저장했어요`); viewVoices(workId); }
+        const old = presets.list.find(x => x.name === name);
+        const list = presets.list.map(x => x === old ? { ...p, id: old.id, name } : x);
+        if (!old) list.push({ id: crypto.randomUUID(), name, ...p });
+        try { await pushPresets({ list }); d.close(); toast(`"${name}" 프리셋을 저장했어요`); viewVoices(workId); }
         catch (e) { toast(e.message, 4000); }
       };
     });
+  });
+  view.querySelectorAll("[data-use]").forEach(b => b.onclick = () => {
+    const p = presets.list.find(x => x.id === b.dataset.use);
+    prefs.preset = prefs.preset === b.dataset.use ? "" : b.dataset.use;
+    savePrefs();
+    toast(prefs.preset ? `이제 "${p?.name}" 목소리로 들어요` : "작품 설정 목소리로 들어요");
+    viewVoices(workId);
+  });
+  view.querySelectorAll("[data-load]").forEach(b => b.onclick = () => {
+    const p = presets.list.find(x => x.id === b.dataset.load);
+    if (!p) return;
+    loaded = p;
+    for (const row of view.querySelectorAll(".voice-row[data-key]")) {
+      if (row.dataset.key === "fallback") continue;
+      const v = getV(row.dataset.key);
+      $(".eng", row).value = v && available.includes(v.engine) ? v.engine : "";
+      fillVoices(row);
+    }
+    view.querySelector(".voice-row[data-key]")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    toast(`"${p.name}"을 위에 불러왔어요. 고친 뒤 같은 이름으로 저장하면 덮어써요`, 3500);
   });
   view.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
     const p = presets.list.find(x => x.id === b.dataset.del);
