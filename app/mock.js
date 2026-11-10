@@ -105,6 +105,7 @@ export async function mockApi(path, opts = {}) {
     throw new Error("문단을 찾지 못했어요");
   }
   if (path === "/api/comments") return { ok: true, saved: true };
+  if (path === "/api/presets") return { ok: true, presets: opts.body || { list: [] } };
   if (path.startsWith("/api/settings/")) return { ok: true, settings: null, common: null };
   if (path === "/api/usage") return { ok: true, usage: { month: "", stopRatio: 0.9, rows: [], eleven: null } };
   throw new Error("예시 모드에서는 쓸 수 없는 기능이에요.");

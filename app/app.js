@@ -21,7 +21,7 @@ const DEFAULT_API = "https://novelreader.hyunra94.workers.dev";
 let cfg = LS.get("nr.cfg", { apiBase: "", apiKey: "" });
 const prefs = Object.assign({
   fontSize: 18, lineHeight: 1.9, theme: "paper", font: "gowun", showNames: true,
-  hidePlanned: true, autoNext: true, follow: true, speed: 1, mode: "auto", oneVoice: false,
+  hidePlanned: true, autoNext: true, follow: true, speed: 1, mode: "auto", oneVoice: false, preset: "",
 }, LS.get("nr.prefs", {}));
 const savePrefs = () => LS.set("nr.prefs", prefs);
 
@@ -925,11 +925,32 @@ function buildSegments(ep, mode, vs, bv, work) {
 
 // 작품 설정 + 공통 인물 목소리를 합친 것 (작품에서 정한 게 우선, 서술은 작품 것만)
 function mergeVs(own, common) {
-  if (!own && !common?.characters) return null;
+  const p = activePreset();
+  if (!own && !common?.characters && !p) return null;
   return {
-    narrator: own?.narrator || null, dialogue: own?.dialogue || null, fallback: own?.fallback || null,
-    characters: { ...(common?.characters || {}), ...(own?.characters || {}) },
+    narrator: p?.narrator || own?.narrator || null,
+    dialogue: p ? (p.dialogue || null) : own?.dialogue || null,
+    fallback: own?.fallback || null,
+    characters: { ...(common?.characters || {}), ...(own?.characters || {}), ...(p?.characters || {}) },
   };
+}
+
+/* ---------- 목소리 프리셋 ----------
+   여러 목소리 묶음을 저장해 두고 듣기 설정에서 바꿔 끼운다 (모든 작품에 적용, 기기끼리 공유).
+   고른 프리셋: 서술·인물·그 밖의 대사를 프리셋 것으로. 프리셋에 없는 인물은 프리셋의 "그 밖의 대사" → 서술 목소리
+-------------------------------------- */
+let presets = LS.get("nr.presets", { list: [] });
+const activePreset = () => (prefs.preset && presets.list.find(p => p.id === prefs.preset)) || null;
+
+async function pullPresets() {
+  if (!canSync()) return presets;
+  try { presets = (await api("/api/presets")).presets || { list: [] }; LS.set("nr.presets", presets); } catch { /* 저장본 사용 */ }
+  return presets;
+}
+
+async function pushPresets(next) {
+  const r = cfg.apiBase === "mock" ? { presets: next } : await api("/api/presets", { method: "PUT", body: next });
+  presets = r.presets; LS.set("nr.presets", presets);
 }
 
 async function getVoiceRaw(workId) {
@@ -1408,6 +1429,7 @@ $("#plMore").onclick = () => {
       <h3>듣기 설정</h3>
       <div class="field"><label>수면 타이머</label>${seg("sleep", [["0", "끄기"], ["15", "15분"], ["30", "30분"], ["60", "1시간"], ["ep", "이 화까지"]], sleepCur === "on" ? "" : sleepCur)}</div>
       <div class="field"><label>목소리</label>${seg("mode", [["auto", "자동"], ["cloud", "클라우드"], ["browser", "브라우저"]], prefs.mode)}<p class="muted" style="margin:6px 0 0">자동: 목소리를 정해 둔 작품은 클라우드 음성, 아니면 브라우저 음성</p></div>
+      <div class="field"><label>목소리 프리셋</label>${seg("preset", [["", "작품 설정"], ...presets.list.map(p => [p.id, esc(p.name)])], prefs.preset)}<p class="muted" style="margin:6px 0 0">🎙 목소리 화면에서 지금 설정을 프리셋으로 저장할 수 있어요</p></div>
       <div class="field"><label>인물 목소리</label>${seg("oneVoice", [["false", "인물마다 다르게"], ["true", "서술 목소리 하나로"]], prefs.oneVoice)}<p class="muted" style="margin:6px 0 0">하나로: 대사도 전부 서술 목소리(예: Google)로 읽어요. 한도가 넉넉한 엔진만 써요</p></div>
       <div class="field"><label>다 들으면 다음 화</label>${seg("autoNext", [["true", "이어서 듣기"], ["false", "멈추기"]], prefs.autoNext)}</div>
       <div class="field"><label>읽는 곳 따라가기</label>${seg("follow", [["true", "켜기"], ["false", "끄기"]], prefs.follow)}</div>
@@ -1421,8 +1443,8 @@ $("#plMore").onclick = () => {
       player.sleepAt = v !== "ep" && v !== "0" ? Date.now() + Number(v) * 60000 : 0;
       setStatus("");
       toast(v === "0" ? "타이머를 껐어요" : v === "ep" ? "이 화까지 듣고 멈춰요" : `${v}분 뒤에 멈춰요`);
-    } else if (n === "mode" || n === "oneVoice") {
-      if (n === "mode") prefs.mode = v; else prefs.oneVoice = v === "true";
+    } else if (n === "mode" || n === "oneVoice" || n === "preset") {
+      if (n === "mode") prefs.mode = v; else if (n === "preset") prefs.preset = v; else prefs.oneVoice = v === "true";
       savePrefs();
       if (player.epId) startListening(player.workId, player.epId, player.curBlock >= 0 ? player.curBlock : null, { autoplay: isPlaying() });
     } else {
@@ -1449,7 +1471,7 @@ async function viewVoices(workId) {
   $("#title").textContent = `${work.title} · 목소리`;
   const engines = await getEngines();
   const available = Object.entries(engines || {}).filter(([, on]) => on).map(([k]) => k);
-  const raw = await getVoiceRaw(workId);
+  const [raw] = await Promise.all([getVoiceRaw(workId), pullPresets()]);
   const vs = raw.own || { narrator: null, dialogue: null, fallback: null, characters: {} };
   const common = raw.common?.characters || {};
   const bv = browserVoiceSettings(workId);
@@ -1478,6 +1500,12 @@ async function viewVoices(workId) {
         </div>`).join("")}
       <p class="muted" style="margin:14px 0 0">인물 칸을 비워 두면 "공통" 목소리로 읽어요. 공통 목소리는 이름이 같은 인물이면 모든 작품에 쓰여요.</p>
       <div class="row end" style="margin-top:10px"><button class="btn" id="vsCommon">인물 목소리를 공통으로</button><button class="btn primary" id="vsSave">저장</button></div>
+    </div>
+    <h2 class="sec">목소리 프리셋 · 모든 작품</h2>
+    <div class="card">
+      <p class="muted" style="margin-top:0">위에서 고른 목소리(비워 둔 인물은 공통 목소리)를 이름 붙여 저장해 두고, 듣기 설정(⋯)에서 바꿔 끼워요.</p>
+      <div class="preset-list">${presets.list.map(p => `<div class="preset-row" data-id="${esc(p.id)}"><div class="grow"><b>${esc(p.name)}</b><div class="muted">서술 ${esc(p.narrator?.label || "작품 설정")} · 인물 ${Object.keys(p.characters || {}).length}명${prefs.preset === p.id ? " · 지금 쓰는 중" : ""}</div></div><button class="icon" data-del="${esc(p.id)}" aria-label="지우기">✕</button></div>`).join("") || '<p class="muted">아직 없어요</p>'}</div>
+      <div class="row end" style="margin-top:10px"><button class="btn" id="vsPreset">지금 설정을 프리셋으로 저장</button></div>
     </div>` : `
     <h2 class="sec">클라우드 음성</h2>
     <div class="card muted">Worker에 TTS API 키를 넣으면 여기서 인물별 목소리를 고를 수 있어요. 그 전에는 브라우저 음성으로 읽어요.</div>`;
@@ -1547,6 +1575,34 @@ async function viewVoices(workId) {
       const r = cfg.apiBase === "mock" ? { settings: body } : await api("/api/settings/_common", { method: "PUT", body });
       LS.set("nr.vs._common", r.settings);
       toast(`인물 ${n}명 목소리를 모든 작품 공통으로 저장했어요`);
+    } catch (e) { toast(e.message, 4000); }
+  });
+
+  $("#vsPreset") && ($("#vsPreset").onclick = () => {
+    const pick = row => { const engine = $(".eng", row).value, voice = $(".voi", row).value; return engine && voice ? { engine, voice, label: $(".voi", row).selectedOptions[0]?.textContent || "" } : null; };
+    const p = { narrator: null, dialogue: null, characters: { ...common } };
+    for (const row of view.querySelectorAll(".voice-row[data-key]")) {
+      const k = row.dataset.key, v = pick(row);
+      if (k.startsWith("c:")) { if (v) p.characters[k.slice(2)] = v; } else if (k === "narrator" || k === "dialogue") p[k] = v;
+    }
+    if (!p.narrator) return toast("서술 목소리를 먼저 골라 주세요.");
+    openDialog(`<div class="stack"><h3>프리셋 이름</h3><input id="psName" maxlength="20" placeholder="예: 구글, 남/여"><div class="row end"><button class="btn" data-close>취소</button><button class="btn primary" id="psOk">저장</button></div></div>`, d => {
+      $("#psOk", d).onclick = async () => {
+        const name = $("#psName", d).value.trim();
+        if (!name) return toast("이름을 넣어 주세요.");
+        const list = presets.list.filter(x => x.name !== name);
+        try { await pushPresets({ list: [...list, { id: crypto.randomUUID(), name, ...p }] }); d.close(); toast(`"${name}" 프리셋을 저장했어요`); viewVoices(workId); }
+        catch (e) { toast(e.message, 4000); }
+      };
+    });
+  });
+  view.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
+    const p = presets.list.find(x => x.id === b.dataset.del);
+    if (!p || !confirm(`"${p.name}" 프리셋을 지울까요?`)) return;
+    try {
+      await pushPresets({ list: presets.list.filter(x => x.id !== p.id) });
+      if (prefs.preset === p.id) { prefs.preset = ""; savePrefs(); }
+      viewVoices(workId);
     } catch (e) { toast(e.message, 4000); }
   });
 
@@ -2226,6 +2282,7 @@ showLock().then(async () => {
   route();
   // 다른 기기에서 읽은 기록을 받아 오고, 목록 화면이면 다시 그린다
   pullMarks();
+  pullPresets();
   await pullProgress();
   if (!location.hash.startsWith("#/ep/") && cfg.apiBase) route();
 });

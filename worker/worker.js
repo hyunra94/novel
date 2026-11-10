@@ -45,6 +45,10 @@ export default {
       if (path === "/api/comments" && method === "POST") {
         return json({ ok: true, ...(await addComment(env, await readJson(request))) }, 200, cors);
       }
+      if (path === "/api/presets") {
+        if (method === "GET") return json({ ok: true, presets: await getPresets(env) }, 200, cors);
+        if (method === "PUT") return json({ ok: true, presets: await savePresets(env, await readJson(request)) }, 200, cors);
+      }
       if ((m = path.match(/^\/api\/settings\/([\w-]+)$/))) {
         if (method === "GET") return json({ ok: true, settings: await getSettings(env, m[1]), common: m[1] === COMMON_ID ? null : await getSettings(env, COMMON_ID) }, 200, cors);
         if (method === "PUT") return json({ ok: true, settings: await saveSettings(env, m[1], await readJson(request)) }, 200, cors);
@@ -582,6 +586,29 @@ const COMMON_ID = "_common";
 
 async function getSettings(env, workId) {
   return (await kv(env).get(`voices:${workId}`, "json")) || null;
+}
+
+/* 목소리 프리셋: 모든 작품에 씌우는 목소리 묶음 (KV presets = {list:[{id,name,narrator,dialogue,characters}]}) */
+const pickVoice = v => (v && ENGINES.includes(v.engine) && typeof v.voice === "string" && v.voice)
+  ? { engine: v.engine, voice: v.voice, label: String(v.label || "").slice(0, 80) } : null;
+
+async function getPresets(env) {
+  return (await kv(env).get("presets", "json")) || { list: [] };
+}
+
+async function savePresets(env, body) {
+  const list = (Array.isArray(body.list) ? body.list : []).slice(0, 12).map(p => {
+    const characters = {};
+    for (const [name, v] of Object.entries(p.characters || {})) { const x = pickVoice(v); if (x) characters[String(name).slice(0, 30)] = x; }
+    return {
+      id: String(p.id || crypto.randomUUID()).slice(0, 40),
+      name: String(p.name || "프리셋").trim().slice(0, 20) || "프리셋",
+      narrator: pickVoice(p.narrator), dialogue: pickVoice(p.dialogue), characters,
+    };
+  });
+  const out = { list, at: Date.now() };
+  await kv(env).put("presets", JSON.stringify(out));
+  return out;
 }
 
 async function saveSettings(env, workId, body) {
