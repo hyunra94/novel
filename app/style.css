@@ -237,3 +237,8 @@ input, select, textarea { font-size: max(16px, 1em); }
 .preset-row:last-child { border-bottom: 0; }
 .preset-row.on b { color: var(--accent); }
 .preset-row .btn.small { white-space: nowrap; }
+
+/* 엔진별 빠르기 */
+.rate-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.rate-row > span { width: 78px; flex: none; font-size: .9em; }
+.rate-row .seg { flex: 1; }

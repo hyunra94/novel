@@ -21,7 +21,7 @@ const DEFAULT_API = "https://novelreader.hyunra94.workers.dev";
 let cfg = LS.get("nr.cfg", { apiBase: "", apiKey: "" });
 const prefs = Object.assign({
   fontSize: 18, lineHeight: 1.9, theme: "paper", font: "gowun", showNames: true,
-  hidePlanned: true, autoNext: true, follow: true, speed: 1, mode: "auto", oneVoice: false, preset: "",
+  hidePlanned: true, autoNext: true, follow: true, speed: 1, mode: "auto", oneVoice: false, preset: "", engRate: { azure: 1.15 },
 }, LS.get("nr.prefs", {}));
 const savePrefs = () => LS.set("nr.prefs", prefs);
 
@@ -1035,6 +1035,10 @@ async function startListening(workId, epId, fromBlock = null, { autoplay = true,
 ------------------------------------------------- */
 const CLOUD_AHEAD = 3;
 
+/* 엔진마다 말 빠르기가 달라서(Azure가 느림) 재생 속도에 엔진별 배수를 곱한다. 듣기 설정에서 바꿈 */
+const engRate = e => Number(prefs.engRate?.[e]) || 1;
+const cloudRate = () => prefs.speed * engRate(player.curEngine);
+
 /* 목소리마다 소리 크기 맞추기
    엔진·목소리마다 녹음 크기가 달라서, 문단 음성을 받을 때 말소리 부분의 크기(dB)를 재고
    목소리별 평균을 기억해 두었다가 재생 볼륨(audio.volume)을 낮춰 TARGET에 맞춘다.
@@ -1089,7 +1093,7 @@ function cloudGet(i) {
       }
       const bytes = await chunkBytes(key);
       const vol = await voiceVolume(used.engine, used.voice, bytes);
-      return { url: URL.createObjectURL(assemble([{ bytes, gap: i === 0 ? 0 : seg.gap }], { tail: 0 }).blob), vol };
+      return { url: URL.createObjectURL(assemble([{ bytes, gap: i === 0 ? 0 : seg.gap }], { tail: 0 }).blob), vol, engine: used.engine };
     })();
     p.catch(() => player.cloud.delete(i)); // 실패하면 다음에 다시 시도
     player.cloud.set(i, p);
@@ -1105,11 +1109,12 @@ async function cloudPlay(i, { autoplay = true, offset = 0 } = {}) {
   const ready = player.cloud.has(i);
   if (!ready) setStatus("음성 만드는 중…");
   try {
-    const { url, vol } = await cloudGet(i);
+    const { url, vol, engine } = await cloudGet(i);
     if (token !== player.token || player.index !== i) return;
     audio.src = url;
     audio.volume = vol;
-    audio.playbackRate = prefs.speed;
+    player.curEngine = engine;
+    audio.playbackRate = cloudRate();
     if (offset) { await new Promise(r => { audio.onloadedmetadata = r; setTimeout(r, 1000); }); audio.currentTime = offset; }
     if (autoplay) await audio.play().catch(() => {});
     updatePlayButton();
@@ -1407,7 +1412,7 @@ $("#plSpeed").onclick = () => {
   const steps = [0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
   prefs.speed = steps[(steps.indexOf(prefs.speed) + 1) % steps.length] || 1;
   savePrefs();
-  audio.playbackRate = prefs.speed;
+  audio.playbackRate = cloudRate();
   if (player.mode === "browser" && player.playing) browserPlay();
   updatePlayButton();
 };
@@ -1431,6 +1436,9 @@ $("#plMore").onclick = () => {
       <div class="field"><label>목소리</label>${seg("mode", [["auto", "자동"], ["cloud", "클라우드"], ["browser", "브라우저"]], prefs.mode)}<p class="muted" style="margin:6px 0 0">자동: 목소리를 정해 둔 작품은 클라우드 음성, 아니면 브라우저 음성</p></div>
       <div class="field"><label>목소리 프리셋</label>${seg("preset", [["", "작품 설정"], ...presets.list.map(p => [p.id, esc(p.name)])], prefs.preset)}<p class="muted" style="margin:6px 0 0">🎙 목소리 화면에서 지금 설정을 프리셋으로 저장할 수 있어요</p></div>
       <div class="field"><label>인물 목소리</label>${seg("oneVoice", [["false", "인물마다 다르게"], ["true", "서술 목소리 하나로"]], prefs.oneVoice)}<p class="muted" style="margin:6px 0 0">하나로: 대사도 전부 서술 목소리(예: Google)로 읽어요. 한도가 넉넉한 엔진만 써요</p></div>
+      <div class="field"><label>엔진별 빠르기</label>
+        ${[["azure", "Azure"], ["elevenlabs", "ElevenLabs"], ["google", "Google"]].map(([e, l]) => `<div class="rate-row"><span>${l}</span>${seg("rate:" + e, [["0.9", "0.9"], ["1", "1"], ["1.1", "1.1"], ["1.15", "1.15"], ["1.2", "1.2"], ["1.3", "1.3"]], engRate(e))}</div>`).join("")}
+        <p class="muted" style="margin:6px 0 0">엔진마다 말 빠르기가 달라서 따로 맞춰요. 위 재생 속도에 곱해져요</p></div>
       <div class="field"><label>다 들으면 다음 화</label>${seg("autoNext", [["true", "이어서 듣기"], ["false", "멈추기"]], prefs.autoNext)}</div>
       <div class="field"><label>읽는 곳 따라가기</label>${seg("follow", [["true", "켜기"], ["false", "끄기"]], prefs.follow)}</div>
       <div class="row end"><button class="btn" id="plStop">듣기 끝내기</button><button class="btn primary" data-close>닫기</button></div>
@@ -1447,6 +1455,10 @@ $("#plMore").onclick = () => {
       if (n === "mode") prefs.mode = v; else if (n === "preset") prefs.preset = v; else prefs.oneVoice = v === "true";
       savePrefs();
       if (player.epId) startListening(player.workId, player.epId, player.curBlock >= 0 ? player.curBlock : null, { autoplay: isPlaying() });
+    } else if (n.startsWith("rate:")) {
+      prefs.engRate = { ...(prefs.engRate || {}), [n.slice(5)]: Number(v) };
+      savePrefs();
+      if (player.mode === "cloud") audio.playbackRate = cloudRate();
     } else {
       prefs[n] = v === "true"; savePrefs();
     }
@@ -1561,6 +1573,7 @@ async function viewVoices(workId) {
         const bytes = await chunkBytes(key);
         const a = new Audio(URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" })));
         a.volume = await voiceVolume(engine, voice, bytes);
+        a.playbackRate = engRate(engine);
         a.play();
       } catch (e) { toast(e.message, 4000); }
     };
