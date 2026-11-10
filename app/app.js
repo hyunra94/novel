@@ -21,7 +21,7 @@ const DEFAULT_API = "https://novelreader.hyunra94.workers.dev";
 let cfg = LS.get("nr.cfg", { apiBase: "", apiKey: "" });
 const prefs = Object.assign({
   fontSize: 18, lineHeight: 1.9, theme: "paper", font: "gowun", showNames: true,
-  hidePlanned: true, autoNext: true, follow: true, speed: 1, mode: "auto",
+  hidePlanned: true, autoNext: true, follow: true, speed: 1, mode: "auto", oneVoice: false,
 }, LS.get("nr.prefs", {}));
 const savePrefs = () => LS.set("nr.prefs", prefs);
 
@@ -884,6 +884,7 @@ function splitText(text, max) {
 
 function voiceFor(b, vs) {
   if (!vs) return null;
+  if (prefs.oneVoice) return vs.narrator; // 듣기 설정 "서술 목소리 하나로"
   if (b.kind === "dialogue") return vs.characters?.[b.speaker] || vs.dialogue || vs.narrator;
   return vs.narrator;
 }
@@ -913,7 +914,7 @@ function buildSegments(ep, mode, vs, bv, work) {
       const gap = k > 0 ? 0.1 : Math.max(pause, prevKind && prevKind !== b.kind ? 0.45 : 0.35);
       const seg = { bi, text, kind: b.kind, speaker: b.speaker || "", gap };
       if (mode === "cloud") Object.assign(seg, voiceFor(b, vs) || {});
-      else seg.pitch = pitchFor(b, bv, work);
+      else seg.pitch = prefs.oneVoice ? 1 : pitchFor(b, bv, work);
       segs.push(seg);
       pause = 0;
     });
@@ -1407,6 +1408,7 @@ $("#plMore").onclick = () => {
       <h3>듣기 설정</h3>
       <div class="field"><label>수면 타이머</label>${seg("sleep", [["0", "끄기"], ["15", "15분"], ["30", "30분"], ["60", "1시간"], ["ep", "이 화까지"]], sleepCur === "on" ? "" : sleepCur)}</div>
       <div class="field"><label>목소리</label>${seg("mode", [["auto", "자동"], ["cloud", "클라우드"], ["browser", "브라우저"]], prefs.mode)}<p class="muted" style="margin:6px 0 0">자동: 목소리를 정해 둔 작품은 클라우드 음성, 아니면 브라우저 음성</p></div>
+      <div class="field"><label>인물 목소리</label>${seg("oneVoice", [["false", "인물마다 다르게"], ["true", "서술 목소리 하나로"]], prefs.oneVoice)}<p class="muted" style="margin:6px 0 0">하나로: 대사도 전부 서술 목소리(예: Google)로 읽어요. 한도가 넉넉한 엔진만 써요</p></div>
       <div class="field"><label>다 들으면 다음 화</label>${seg("autoNext", [["true", "이어서 듣기"], ["false", "멈추기"]], prefs.autoNext)}</div>
       <div class="field"><label>읽는 곳 따라가기</label>${seg("follow", [["true", "켜기"], ["false", "끄기"]], prefs.follow)}</div>
       <div class="row end"><button class="btn" id="plStop">듣기 끝내기</button><button class="btn primary" data-close>닫기</button></div>
@@ -1419,8 +1421,9 @@ $("#plMore").onclick = () => {
       player.sleepAt = v !== "ep" && v !== "0" ? Date.now() + Number(v) * 60000 : 0;
       setStatus("");
       toast(v === "0" ? "타이머를 껐어요" : v === "ep" ? "이 화까지 듣고 멈춰요" : `${v}분 뒤에 멈춰요`);
-    } else if (n === "mode") {
-      prefs.mode = v; savePrefs();
+    } else if (n === "mode" || n === "oneVoice") {
+      if (n === "mode") prefs.mode = v; else prefs.oneVoice = v === "true";
+      savePrefs();
       if (player.epId) startListening(player.workId, player.epId, player.curBlock >= 0 ? player.curBlock : null, { autoplay: isPlaying() });
     } else {
       prefs[n] = v === "true"; savePrefs();
