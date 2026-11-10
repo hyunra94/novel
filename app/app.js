@@ -1013,23 +1013,61 @@ async function startListening(workId, epId, fromBlock = null, { autoplay = true,
 ------------------------------------------------- */
 const CLOUD_AHEAD = 3;
 
+/* 목소리마다 소리 크기 맞추기
+   엔진·목소리마다 녹음 크기가 달라서, 문단 음성을 받을 때 말소리 부분의 크기(dB)를 재고
+   목소리별 평균을 기억해 두었다가 재생 볼륨(audio.volume)을 낮춰 TARGET에 맞춘다.
+   (줄이기만 하고 키우지는 않음. 아이폰 Safari는 audio.volume을 무시함) */
+const LOUD_TARGET = -23;
+const loudDb = LS.get("nr.loud", {});
+let loudCtx = null;
+
+async function measureDb(bytes) {
+  try {
+    loudCtx = loudCtx || new OfflineAudioContext(1, 1, 24000);
+    const buf = await loudCtx.decodeAudioData(bytes.slice().buffer);
+    const d = buf.getChannelData(0);
+    const win = Math.floor(buf.sampleRate * 0.05);
+    let sum = 0, n = 0;
+    for (let k = 0; k + win <= d.length; k += win) {
+      let e = 0;
+      for (let j = k; j < k + win; j++) e += d[j] * d[j];
+      e /= win;
+      if (e > 1e-5) { sum += e; n++; } // -50dB보다 작은 조용한 구간은 빼고
+    }
+    return n ? 10 * Math.log10(sum / n) : null;
+  } catch { return null; }
+}
+
+async function voiceVolume(engine, voice, bytes) {
+  const id = `${engine}:${voice}`;
+  const db = await measureDb(bytes);
+  if (db != null) {
+    loudDb[id] = loudDb[id] == null ? db : loudDb[id] * 0.8 + db * 0.2; // 목소리 평균 (문단마다 크게 흔들리지 않게)
+    LS.set("nr.loud", loudDb);
+  }
+  const avg = loudDb[id];
+  return avg == null ? 1 : Math.min(1, Math.pow(10, (LOUD_TARGET - avg) / 20));
+}
+
 function cloudGet(i) {
   const seg = player.segs[i];
   if (!seg) return null;
   let p = player.cloud.get(i);
   if (!p) {
     p = (async () => {
-      let key;
+      let key, used = seg;
       try { key = await ttsOnce(seg.engine, seg.voice, seg.text); }
       catch (e) {
         if (e.code !== "REFUSED") throw e;
         const fb = player.vs?.fallback || player.vs?.narrator;
         if (!fb || (fb.engine === seg.engine && fb.voice === seg.voice)) throw e;
         key = await ttsOnce(fb.engine, fb.voice, seg.text);
+        used = fb;
         player.refused++;
       }
       const bytes = await chunkBytes(key);
-      return URL.createObjectURL(assemble([{ bytes, gap: i === 0 ? 0 : seg.gap }], { tail: 0 }).blob);
+      const vol = await voiceVolume(used.engine, used.voice, bytes);
+      return { url: URL.createObjectURL(assemble([{ bytes, gap: i === 0 ? 0 : seg.gap }], { tail: 0 }).blob), vol };
     })();
     p.catch(() => player.cloud.delete(i)); // 실패하면 다음에 다시 시도
     player.cloud.set(i, p);
@@ -1045,9 +1083,10 @@ async function cloudPlay(i, { autoplay = true, offset = 0 } = {}) {
   const ready = player.cloud.has(i);
   if (!ready) setStatus("음성 만드는 중…");
   try {
-    const url = await cloudGet(i);
+    const { url, vol } = await cloudGet(i);
     if (token !== player.token || player.index !== i) return;
     audio.src = url;
+    audio.volume = vol;
     audio.playbackRate = prefs.speed;
     if (offset) { await new Promise(r => { audio.onloadedmetadata = r; setTimeout(r, 1000); }); audio.currentTime = offset; }
     if (autoplay) await audio.play().catch(() => {});
@@ -1293,7 +1332,7 @@ function onEpisodeEnd() {
   queueSync();
   const pos = LS.get(`nr.pos.${epId}`, {});
   delete pos.listenBlock; delete pos.listenTime;
-  player.cloud?.forEach(p => p.then(u => URL.revokeObjectURL(u)).catch(() => {}));
+  player.cloud?.forEach(p => p.then(x => URL.revokeObjectURL(x.url)).catch(() => {}));
   LS.set(`nr.pos.${epId}`, pos);
   player.playing = false;
   updatePlayButton();
@@ -1485,6 +1524,7 @@ async function viewVoices(workId) {
         const key = await ttsOnce(engine, voice, text);
         const bytes = await chunkBytes(key);
         const a = new Audio(URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" })));
+        a.volume = await voiceVolume(engine, voice, bytes);
         a.play();
       } catch (e) { toast(e.message, 4000); }
     };
