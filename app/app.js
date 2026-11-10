@@ -922,15 +922,30 @@ function buildSegments(ep, mode, vs, bv, work) {
   return segs;
 }
 
-async function getVoiceSettings(workId) {
-  if (cfg.apiBase === "mock") return LS.get(`nr.vs.${workId}`, null);
+// 작품 설정 + 공통 인물 목소리를 합친 것 (작품에서 정한 게 우선, 서술은 작품 것만)
+function mergeVs(own, common) {
+  if (!own && !common?.characters) return null;
+  return {
+    narrator: own?.narrator || null, dialogue: own?.dialogue || null, fallback: own?.fallback || null,
+    characters: { ...(common?.characters || {}), ...(own?.characters || {}) },
+  };
+}
+
+async function getVoiceRaw(workId) {
+  if (cfg.apiBase === "mock") return { own: LS.get(`nr.vs.${workId}`, null), common: LS.get("nr.vs._common", null) };
   try {
     const r = await api(`/api/settings/${workId}`);
     LS.set(`nr.vs.${workId}`, r.settings);
-    return r.settings;
+    LS.set("nr.vs._common", r.common || null);
+    return { own: r.settings, common: r.common || null };
   } catch {
-    return LS.get(`nr.vs.${workId}`, null);
+    return { own: LS.get(`nr.vs.${workId}`, null), common: LS.get("nr.vs._common", null) };
   }
+}
+
+async function getVoiceSettings(workId) {
+  const { own, common } = await getVoiceRaw(workId);
+  return mergeVs(own, common);
 }
 
 async function getEngines() {
@@ -979,29 +994,91 @@ async function startListening(workId, epId, fromBlock = null, { autoplay = true,
     return;
   }
 
+  if (player.segs.find(x => !x.engine || !x.voice)) {
+    setStatus("멈춤");
+    return cloudFailed(new Error("목소리가 정해지지 않은 부분이 있어요. 목소리 설정을 확인해 주세요."), workId, epId, startBlock);
+  }
+  player.vs = decided.vs;
+  player.cloud = new Map();
+  player.refused = 0;
+  audio.playbackRate = prefs.speed;
+  audio.preservesPitch = true;
+  cloudPlay(startIdx, { autoplay });
+}
+
+/* ---------- 클라우드 음성: 한 문단씩 ----------
+   듣기 시작한 문단부터 만들어서 바로 틀고, 그동안 다음 몇 문단만 미리 만든다.
+   멈추면 더 만들지 않으니, 듣지 않은 부분에는 무료 한도를 쓰지 않는다.
+   만든 문단은 Worker(R2)와 이 기기(nr-chunks)에 남아서 다시 들을 때는 한도를 쓰지 않는다.
+------------------------------------------------- */
+const CLOUD_AHEAD = 3;
+
+function cloudGet(i) {
+  const seg = player.segs[i];
+  if (!seg) return null;
+  let p = player.cloud.get(i);
+  if (!p) {
+    p = (async () => {
+      let key;
+      try { key = await ttsOnce(seg.engine, seg.voice, seg.text); }
+      catch (e) {
+        if (e.code !== "REFUSED") throw e;
+        const fb = player.vs?.fallback || player.vs?.narrator;
+        if (!fb || (fb.engine === seg.engine && fb.voice === seg.voice)) throw e;
+        key = await ttsOnce(fb.engine, fb.voice, seg.text);
+        player.refused++;
+      }
+      const bytes = await chunkBytes(key);
+      return URL.createObjectURL(assemble([{ bytes, gap: i === 0 ? 0 : seg.gap }], { tail: 0 }).blob);
+    })();
+    p.catch(() => player.cloud.delete(i)); // 실패하면 다음에 다시 시도
+    player.cloud.set(i, p);
+  }
+  return p;
+}
+
+async function cloudPlay(i, { autoplay = true, offset = 0 } = {}) {
+  const token = player.token;
+  if (i >= player.segs.length) return onEpisodeEnd();
+  player.index = i;
+  onSegment(i);
+  const ready = player.cloud.has(i);
+  if (!ready) setStatus("음성 만드는 중…");
   try {
-    setStatus("음성 준비 중…");
-    const meta = await prepareCloud(ep, player.segs, decided.vs, (done, total, phase) => {
-      if (token === player.token) setStatus(`${phase === "make" ? "음성 만드는 중" : "받는 중"} ${done}/${total}`);
-    });
-    if (token !== player.token) return;
-    player.meta = meta;
-    if (player.url) URL.revokeObjectURL(player.url);
-    player.url = URL.createObjectURL(meta.blob);
-    audio.src = player.url;
+    const url = await cloudGet(i);
+    if (token !== player.token || player.index !== i) return;
+    audio.src = url;
     audio.playbackRate = prefs.speed;
-    audio.preservesPitch = true;
-    const t = fromBlock == null && saved.listenTime ? saved.listenTime : meta.starts[startIdx] || 0;
-    await new Promise(r => { audio.onloadedmetadata = r; setTimeout(r, 1500); });
-    audio.currentTime = Math.max(0, t - 0.15);
-    setStatus(meta.refused ? `거절된 대사 ${meta.refused}줄은 대신 읽어요` : "");
-    if (autoplay) await audio.play().catch(() => updatePlayButton());
+    if (offset) { await new Promise(r => { audio.onloadedmetadata = r; setTimeout(r, 1000); }); audio.currentTime = offset; }
+    if (autoplay) await audio.play().catch(() => {});
     updatePlayButton();
+    setStatus(player.refused ? `거절된 대사 ${player.refused}줄은 대신 읽어요` : "");
   } catch (e) {
     if (token !== player.token) return;
     setStatus("멈춤");
-    cloudFailed(e, workId, epId, startBlock);
+    updatePlayButton();
+    return cloudFailed(e, player.workId, player.epId, player.segs[i]?.bi ?? 0);
   }
+  // 다음 몇 문단만 미리 (순서대로)
+  (async () => {
+    for (let k = i + 1; k <= i + CLOUD_AHEAD && k < player.segs.length; k++) {
+      if (token !== player.token) return;
+      try { await cloudGet(k); } catch { return; }
+    }
+  })();
+  // 이 화 거의 끝이면 다음 화 첫 문단만 미리
+  if (i >= player.segs.length - 2) prefetchNextStart();
+}
+
+async function prefetchNextStart() {
+  const next = prefs.autoNext ? nextEpisodeOf(player.workId, player.epId) : null;
+  if (!next || player.prefetched[next.id]) return;
+  player.prefetched[next.id] = true;
+  try {
+    const ep = await loadEpisode(next.id);
+    const segs = buildSegments(ep, "cloud", player.vs, null, player.work);
+    for (const x of segs.slice(0, 2)) if (x.engine && x.voice) await chunkBytes(await ttsOnce(x.engine, x.voice, x.text));
+  } catch { /* 다음 화는 들을 때 다시 시도 */ }
 }
 
 function cloudFailed(e, workId, epId, fromBlock) {
@@ -1019,23 +1096,7 @@ function cloudFailed(e, workId, epId, fromBlock) {
 
 /* ---------- 클라우드 음성 만들기 ---------- */
 
-async function sha1(text) {
-  const buf = await crypto.subtle.digest("SHA-1", new TextEncoder().encode(text));
-  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
-}
 
-async function pool(items, size, fn) {
-  let next = 0;
-  let failed = null;
-  const worker = async () => {
-    while (!failed && next < items.length) {
-      const i = next++;
-      try { await fn(items[i], i); } catch (e) { failed = failed || e; }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(size, items.length) }, worker));
-  if (failed) throw failed;
-}
 
 async function ttsOnce(engine, voice, text) {
   for (let attempt = 0; ; attempt++) {
@@ -1058,54 +1119,6 @@ async function chunkBytes(key) {
     r = res;
   }
   return new Uint8Array(await r.arrayBuffer());
-}
-
-async function audioCacheGet(epId, sig) {
-  const meta = LS.get(`nr.am.${epId}`, null);
-  if (!meta || meta.sig !== sig) return null;
-  const c = await caches.open("nr-audio");
-  const r = await c.match(`/__audio/${epId}`);
-  if (!r) return null;
-  return { ...meta, blob: await r.blob() };
-}
-
-async function audioCacheSet(epId, blob, meta) {
-  const c = await caches.open("nr-audio");
-  await c.put(`/__audio/${epId}`, new Response(blob, { headers: { "Content-Type": "audio/mpeg" } }));
-  LS.set(`nr.am.${epId}`, meta);
-}
-
-async function prepareCloud(ep, segs, vs, onProgress = () => {}) {
-  if (cfg.apiBase === "mock") throw new Error("예시 모드에서는 클라우드 음성을 쓸 수 없어요.");
-  const missing = segs.find(s => !s.engine || !s.voice);
-  if (missing) throw new Error("목소리가 정해지지 않은 부분이 있어요. 목소리 설정을 확인해 주세요.");
-  const sig = await sha1(JSON.stringify(segs.map(s => [s.engine, s.voice, s.text, s.gap])));
-  const cached = await audioCacheGet(ep.id, sig);
-  if (cached) return cached;
-
-  const keys = [];
-  let done = 0;
-  let refused = 0;
-  await pool(segs, 3, async (s, i) => {
-    try {
-      keys[i] = await ttsOnce(s.engine, s.voice, s.text);
-    } catch (e) {
-      if (e.code !== "REFUSED") throw e;
-      const fb = vs?.fallback || vs?.narrator;
-      if (!fb || (fb.engine === s.engine && fb.voice === s.voice)) throw e;
-      keys[i] = await ttsOnce(fb.engine, fb.voice, s.text);
-      refused++;
-    }
-    onProgress(++done, segs.length, "make");
-  });
-
-  const bytes = [];
-  done = 0;
-  await pool(keys, 4, async (k, i) => { bytes[i] = await chunkBytes(k); onProgress(++done, keys.length, "down"); });
-  const { blob, starts, ends, duration } = assemble(segs.map((s, i) => ({ bytes: bytes[i], gap: s.gap })));
-  const meta = { sig, starts, ends, duration, refused };
-  await audioCacheSet(ep.id, blob, meta);
-  return { ...meta, blob };
 }
 
 /* ---------- 브라우저 음성 ---------- */
@@ -1215,7 +1228,8 @@ function stopPlayback(hide = true) {
 
 function seekBy(sec) {
   if (player.mode === "cloud") {
-    audio.currentTime = Math.max(0, Math.min(audio.duration || 0, audio.currentTime + sec));
+    if (sec < 0 && audio.currentTime > 3) { audio.currentTime = 0; return; }
+    cloudPlay(Math.max(0, Math.min(player.segs.length - 1, player.index + (sec > 0 ? 1 : -1))), { autoplay: !audio.paused });
   } else {
     player.index = Math.max(0, Math.min(player.segs.length - 1, player.index + (sec > 0 ? 1 : -1)));
     if (player.playing) browserPlay(); else onSegment(player.index);
@@ -1229,7 +1243,6 @@ function onSegment(idx) {
   if (s.bi !== player.curBlock) markSpeaking(s.bi, true);
   const pos = LS.get(`nr.pos.${player.epId}`, {});
   pos.listenBlock = s.bi;
-  if (player.mode === "cloud") pos.listenTime = audio.currentTime;
   LS.set(`nr.pos.${player.epId}`, pos);
   if (player.mode === "browser") $("#plBar").style.width = `${(idx / player.segs.length) * 100}%`;
 }
@@ -1250,33 +1263,21 @@ function markSpeaking(bi, follow = true) {
   }
 }
 
-function segAtTime(t) {
-  const st = player.meta?.starts || [];
-  let lo = 0, hi = st.length - 1, ans = 0;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (st[mid] <= t + 0.05) { ans = mid; lo = mid + 1; } else hi = mid - 1;
-  }
-  return ans;
-}
-
 audio.addEventListener("timeupdate", () => {
-  if (player.mode !== "cloud" || !player.meta) return;
-  const t = audio.currentTime;
-  const idx = segAtTime(t);
-  if (idx !== player.index || player.curBlock < 0) onSegment(idx);
-  const d = player.meta.duration || audio.duration || 1;
-  $("#plBar").style.width = `${(t / d) * 100}%`;
-  if (!$("#plStatus").dataset.lock) setStatus(`${fmtTime(t / 1)} / ${fmtTime(d)}`);
+  if (player.mode !== "cloud" || !player.segs.length) return;
+  const d = audio.duration || 1;
+  const frac = (player.index + Math.min(1, audio.currentTime / d)) / player.segs.length;
+  $("#plBar").style.width = `${frac * 100}%`;
+  if (!$("#plStatus").dataset.lock && !audio.paused) setStatus(`${player.index + 1} / ${player.segs.length} 문단`);
   checkSleep();
-  maybePrefetch(t / d);
-  if ("mediaSession" in navigator && navigator.mediaSession.setPositionState && isFinite(d)) {
-    try { navigator.mediaSession.setPositionState({ duration: d, position: Math.min(t, d), playbackRate: audio.playbackRate }); } catch { /* 무시 */ }
-  }
 });
 audio.addEventListener("play", updatePlayButton);
 audio.addEventListener("pause", updatePlayButton);
-audio.addEventListener("ended", () => { if (player.mode === "cloud") onEpisodeEnd(); });
+audio.addEventListener("ended", () => {
+  if (player.mode !== "cloud") return;
+  if (checkSleep()) return;
+  cloudPlay(player.index + 1);
+});
 
 function nextEpisodeOf(workId, epId) {
   const work = state.work[workId];
@@ -1292,6 +1293,7 @@ function onEpisodeEnd() {
   queueSync();
   const pos = LS.get(`nr.pos.${epId}`, {});
   delete pos.listenBlock; delete pos.listenTime;
+  player.cloud?.forEach(p => p.then(u => URL.revokeObjectURL(u)).catch(() => {}));
   LS.set(`nr.pos.${epId}`, pos);
   player.playing = false;
   updatePlayButton();
@@ -1302,19 +1304,6 @@ function onEpisodeEnd() {
   startListening(workId, next.id, 0);
 }
 
-async function maybePrefetch(ratio) {
-  if (ratio < 0.3 || player.mode !== "cloud") return;
-  const next = nextEpisodeOf(player.workId, player.epId);
-  if (!next || player.prefetched[next.id]) return;
-  player.prefetched[next.id] = true;
-  try {
-    const ep = await loadEpisode(next.id);
-    const vs = await getVoiceSettings(player.workId);
-    if (!vs?.narrator) return;
-    const segs = buildSegments(ep, "cloud", vs, null, player.work);
-    await prepareCloud(ep, segs, vs);
-  } catch { /* 다음 화는 들을 때 다시 시도 */ }
-}
 
 function checkSleep() {
   if (player.sleepAt && Date.now() >= player.sleepAt) {
@@ -1345,7 +1334,7 @@ function setMediaSession() {
   set("previoustrack", () => {
     const s = player.segs[player.index];
     const prev = player.segs.findLastIndex((x, i) => i < player.index && x.bi !== s?.bi);
-    if (player.mode === "cloud") audio.currentTime = player.meta.starts[Math.max(0, prev)] || 0;
+    if (player.mode === "cloud") cloudPlay(Math.max(0, prev));
     else { player.index = Math.max(0, prev); if (player.playing) browserPlay(); }
   });
 }
@@ -1362,9 +1351,9 @@ $("#plSpeed").onclick = () => {
   updatePlayButton();
 };
 $(".pl-bar").onclick = e => {
-  if (player.mode !== "cloud" || !player.meta) return;
+  if (player.mode !== "cloud" || !player.segs.length) return;
   const r = e.currentTarget.getBoundingClientRect();
-  audio.currentTime = ((e.clientX - r.left) / r.width) * player.meta.duration;
+  cloudPlay(Math.min(player.segs.length - 1, Math.floor(((e.clientX - r.left) / r.width) * player.segs.length)), { autoplay: !audio.paused });
 };
 $(".pl-info").onclick = e => {
   if (e.target.closest(".pl-bar")) return;
@@ -1418,7 +1407,9 @@ async function viewVoices(workId) {
   $("#title").textContent = `${work.title} · 목소리`;
   const engines = await getEngines();
   const available = Object.entries(engines || {}).filter(([, on]) => on).map(([k]) => k);
-  const vs = (await getVoiceSettings(workId)) || { narrator: null, dialogue: null, fallback: null, characters: {} };
+  const raw = await getVoiceRaw(workId);
+  const vs = raw.own || { narrator: null, dialogue: null, fallback: null, characters: {} };
+  const common = raw.common?.characters || {};
   const bv = browserVoiceSettings(workId);
 
   const rows = [
@@ -1438,12 +1429,13 @@ async function viewVoices(workId) {
         <div class="voice-row" data-key="${esc(r.key)}">
           <div class="who-name">${r.color ? `<span class="dot" style="background:${r.color}"></span>` : ""}${esc(r.name)} ${r.hint ? `<span class="muted">${esc(r.hint)}</span>` : ""}</div>
           <div class="sel">
-            <select class="eng"><option value="">${r.required ? "엔진 선택" : r.key.startsWith("c:") ? "그 밖의 인물과 같게" : "서술과 같게"}</option>${available.map(e => `<option value="${e}" ${getV(r.key)?.engine === e ? "selected" : ""}>${ENGINE_LABEL[e]}</option>`).join("")}</select>
+            <select class="eng"><option value="">${r.required ? "엔진 선택" : r.key.startsWith("c:") ? (common[r.key.slice(2)] ? `공통: ${esc(common[r.key.slice(2)].label || common[r.key.slice(2)].voice)}` : "그 밖의 인물과 같게") : "서술과 같게"}</option>${available.map(e => `<option value="${e}" ${getV(r.key)?.engine === e ? "selected" : ""}>${ENGINE_LABEL[e]}</option>`).join("")}</select>
             <select class="voi"><option value="">—</option></select>
             <button class="btn small try" title="미리 듣기">▶</button>
           </div>
         </div>`).join("")}
-      <div class="row end" style="margin-top:14px"><button class="btn primary" id="vsSave">저장</button></div>
+      <p class="muted" style="margin:14px 0 0">인물 칸을 비워 두면 "공통" 목소리로 읽어요. 공통 목소리는 이름이 같은 인물이면 모든 작품에 쓰여요.</p>
+      <div class="row end" style="margin-top:10px"><button class="btn" id="vsCommon">인물 목소리를 공통으로</button><button class="btn primary" id="vsSave">저장</button></div>
     </div>` : `
     <h2 class="sec">클라우드 음성</h2>
     <div class="card muted">Worker에 TTS API 키를 넣으면 여기서 인물별 목소리를 고를 수 있어요. 그 전에는 브라우저 음성으로 읽어요.</div>`;
@@ -1496,6 +1488,23 @@ async function viewVoices(workId) {
         a.play();
       } catch (e) { toast(e.message, 4000); }
     };
+  });
+
+  // 지금 화면에서 고른 인물 목소리를 모든 작품 공통으로 (원래 공통에 있던 다른 인물은 그대로)
+  $("#vsCommon") && ($("#vsCommon").onclick = async () => {
+    const chars = { ...common };
+    let n = 0;
+    for (const row of view.querySelectorAll('.voice-row[data-key^="c:"]')) {
+      const engine = $(".eng", row).value, voice = $(".voi", row).value;
+      if (engine && voice) { chars[row.dataset.key.slice(2)] = { engine, voice, label: $(".voi", row).selectedOptions[0]?.textContent || "" }; n++; }
+    }
+    if (!n) return toast("공통으로 할 인물 목소리를 먼저 골라 주세요.");
+    const body = { narrator: null, dialogue: null, fallback: null, characters: chars };
+    try {
+      const r = cfg.apiBase === "mock" ? { settings: body } : await api("/api/settings/_common", { method: "PUT", body });
+      LS.set("nr.vs._common", r.settings);
+      toast(`인물 ${n}명 목소리를 모든 작품 공통으로 저장했어요`);
+    } catch (e) { toast(e.message, 4000); }
   });
 
   $("#vsSave") && ($("#vsSave").onclick = async () => {
@@ -2167,6 +2176,9 @@ if ("serviceWorker" in navigator && location.protocol === "https:") {
   });
   window.addEventListener("hashchange", reloadIfIdle);
 }
+// 예전 방식(회차 전체 음성) 저장본은 더 안 씀
+caches.delete("nr-audio").catch(() => {});
+
 showLock().then(async () => {
   route();
   // 다른 기기에서 읽은 기록을 받아 오고, 목록 화면이면 다시 그린다

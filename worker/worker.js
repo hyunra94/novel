@@ -46,7 +46,7 @@ export default {
         return json({ ok: true, ...(await addComment(env, await readJson(request))) }, 200, cors);
       }
       if ((m = path.match(/^\/api\/settings\/([\w-]+)$/))) {
-        if (method === "GET") return json({ ok: true, settings: await getSettings(env, m[1]) }, 200, cors);
+        if (method === "GET") return json({ ok: true, settings: await getSettings(env, m[1]), common: m[1] === COMMON_ID ? null : await getSettings(env, COMMON_ID) }, 200, cors);
         if (method === "PUT") return json({ ok: true, settings: await saveSettings(env, m[1], await readJson(request)) }, 200, cors);
       }
       if (path === "/api/voices" && method === "GET") {
@@ -575,7 +575,10 @@ async function addComment(env, body) {
   return { saved: true };
 }
 
-/* ---------------- 목소리 설정 (작품별) ---------------- */
+/* ---------------- 목소리 설정 (작품별) ----------------
+   voices:_common = 모든 작품 공통 인물 목소리. 작품에서 따로 정하지 않은 인물은 이걸 쓴다 (서술은 작품마다 정함)
+------------------------------------------------------- */
+const COMMON_ID = "_common";
 
 async function getSettings(env, workId) {
   return (await kv(env).get(`voices:${workId}`, "json")) || null;

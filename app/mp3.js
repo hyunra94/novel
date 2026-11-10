@@ -76,7 +76,7 @@ export function silenceCount(seconds) {
 
 // parts: [{ bytes: Uint8Array, gap: 앞에 둘 쉼(초) }]
 // 결과: { blob, starts: [각 조각이 시작하는 시간(초)], ends, duration }
-export function assemble(parts) {
+export function assemble(parts, { tail = 0.5 } = {}) {
   const pieces = [];
   const starts = [];
   const ends = [];
@@ -102,8 +102,8 @@ export function assemble(parts) {
     for (const [off, len] of frames) pushFrame(part.bytes, off, len);
     ends.push(frameCount * FRAME_SEC);
   }
-  // 끝에 0.5초 여유
-  for (let k = 0; k < silenceCount(0.5); k++) pushFrame(SILENCE, 0, SILENCE.length);
+  // 끝 여유 (한 문단씩 틀 때는 0)
+  for (let k = 0; k < silenceCount(tail); k++) pushFrame(SILENCE, 0, SILENCE.length);
 
   const xing = xingFrame(frameCount, audioBytes, frameOffsets);
   const blob = new Blob([xing, ...pieces], { type: "audio/mpeg" });
