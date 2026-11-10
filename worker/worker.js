@@ -14,7 +14,11 @@
 const NOTION_VERSION = "2025-09-03";
 const ENGINES = ["google", "azure", "elevenlabs"];
 const MAX_TTS_CHARS = 1800;
+// 엔진별로 소리를 줄이는 정도 (1단계 = 1.5dB). 소리가 너무 커서 깨지는 것을 막는다.
+// 바꾸면 그 엔진 음성은 새로 만들어진다(저장 키가 달라짐). wrangler.toml [vars]의 GAIN_STEPS_엔진으로 덮어쓸 수 있다.
+const GAIN_STEPS = { google: 0, azure: 0, elevenlabs: 6 }; // 시험: ElevenLabs가 Google·Azure보다 약 9dB 커서 피크가 0.93까지 감
 
+export { mp3Gain };
 export default {
   async fetch(request, env) {
     const cors = corsHeaders(request, env);
@@ -759,7 +763,8 @@ async function tts(env, body) {
   if (!enginesAvailable(env)[engine]) throw httpError(400, `${engineLabel(engine)} API 키가 Worker에 없어요.`);
 
   const model = engine === "elevenlabs" ? elevenModel(env) : "";
-  const hash = await sha256hex(`${engine}\n${voice}\n${model}\n${text}`);
+  const steps = gainSteps(env, engine);
+  const hash = await sha256hex(`${engine}\n${voice}\n${model}\n${text}${steps ? `\ng${steps}` : ""}`);
   const key = `chunks/${hash}.mp3`;
   if (await env.AUDIO.head(key)) return { key: hash, cached: true };
 
@@ -767,11 +772,58 @@ async function tts(env, body) {
   const cost = engine === "elevenlabs" ? Math.ceil(text.length * elevenMultiplier(model)) : text.length;
   await checkQuota(env, engine, family, cost);
 
-  const audio = await synth(env, engine, voice, model, text);
+  const audio = mp3Gain(await synth(env, engine, voice, model, text), -steps);
   if (!audio || audio.byteLength < 100) throw httpError(502, `${engineLabel(engine)}에서 빈 음성이 왔어요.`);
   await env.AUDIO.put(key, audio, { httpMetadata: { contentType: "audio/mpeg" }, customMetadata: { engine, voice } });
   await addUsage(env, engine, family, cost);
   return { key: hash, cached: false, cost };
+}
+
+function gainSteps(env, engine) {
+  const v = Number(env[`GAIN_STEPS_${engine.toUpperCase()}`]);
+  return Number.isFinite(v) && v >= 0 && v <= 12 ? Math.round(v) : GAIN_STEPS[engine] || 0;
+}
+
+/* mp3 소리 크기 바꾸기 (mp3gain과 같은 방식)
+   다시 인코딩하지 않고 프레임마다 global_gain 값만 고친다. 1 = 1.5dB. 프레임 길이는 그대로라 이어 붙이기에 영향 없음 */
+const MP3_BITRATE = {
+  1: [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+  2: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+};
+const MP3_RATE = { 3: [44100, 48000, 32000], 2: [22050, 24000, 16000], 0: [11025, 12000, 8000] };
+
+function mp3Gain(buf, delta) {
+  if (!delta || !buf?.length) return buf;
+  const b = new Uint8Array(buf);
+  const readBits = (pos, n) => { let v = 0; for (let i = 0; i < n; i++) { const p = pos + i; v = (v << 1) | ((b[p >> 3] >> (7 - (p & 7))) & 1); } return v; };
+  const writeBits = (pos, n, v) => { for (let i = 0; i < n; i++) { const p = pos + i; const bit = (v >> (n - 1 - i)) & 1; b[p >> 3] = (b[p >> 3] & ~(1 << (7 - (p & 7)))) | (bit << (7 - (p & 7))); } };
+  let i = 0;
+  if (b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33) i = 10 + ((b[6] & 0x7f) << 21 | (b[7] & 0x7f) << 14 | (b[8] & 0x7f) << 7 | (b[9] & 0x7f)); // ID3v2 건너뜀
+  while (i + 4 <= b.length) {
+    if (b[i] !== 0xff || (b[i + 1] & 0xe0) !== 0xe0) { i++; continue; }
+    const ver = (b[i + 1] >> 3) & 3;          // 3: MPEG-1, 2: MPEG-2, 0: MPEG-2.5
+    const layer = (b[i + 1] >> 1) & 3;        // 1: Layer III
+    const prot = b[i + 1] & 1;                // 0이면 CRC 2바이트
+    const bri = (b[i + 2] >> 4) & 15, sri = (b[i + 2] >> 2) & 3, pad = (b[i + 2] >> 1) & 1;
+    const mode = (b[i + 3] >> 6) & 3;          // 3: 모노
+    if (ver === 1 || layer !== 1 || bri === 0 || bri === 15 || sri === 3) { i++; continue; }
+    const mpeg1 = ver === 3;
+    const br = MP3_BITRATE[mpeg1 ? 1 : 2][bri] * 1000, sr = MP3_RATE[ver][sri];
+    const len = Math.floor((mpeg1 ? 144 : 72) * br / sr) + pad;
+    if (len < 8 || i + len > b.length) break;
+    const nch = mode === 3 ? 1 : 2;
+    let pos = (i + 4 + (prot ? 0 : 2)) * 8;
+    let blocks, size;
+    if (mpeg1) { pos += 9 + (nch === 1 ? 5 : 3) + 4 * nch; blocks = 2 * nch; size = 59; }
+    else { pos += 8 + (nch === 1 ? 1 : 2); blocks = nch; size = 63; }
+    for (let k = 0; k < blocks; k++) {
+      const at = pos + k * size + 21;           // part2_3_length(12) + big_values(9) 다음이 global_gain(8)
+      const g = readBits(at, 8);
+      if (g > 0) writeBits(at, 8, Math.max(1, Math.min(255, g + delta)));
+    }
+    i += len;
+  }
+  return b;
 }
 
 // 세 엔진 모두 24kHz 모노 mp3로 받는다 → 앱에서 이어 붙일 수 있음
