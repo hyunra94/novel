@@ -144,6 +144,18 @@ function kv(env) {
   return env.NR_KV;
 }
 
+/* 자주 바뀌는 값(읽은 기록, 사용량)은 R2에 JSON으로 둔다.
+   KV 무료는 쓰기가 하루 1,000번뿐이라, 문단마다 사용량을 적으면 금방 막힌다 (R2는 쓰기 월 100만 번) */
+async function stateGet(env, name) {
+  if (!env.AUDIO) return null;
+  const obj = await env.AUDIO.get(`state/${name}.json`);
+  return obj ? obj.json() : null;
+}
+async function statePut(env, name, data) {
+  if (!env.AUDIO) throw httpError(500, "AUDIO(R2 버킷)가 연결되지 않았어요.");
+  await env.AUDIO.put(`state/${name}.json`, JSON.stringify(data), { httpMetadata: { contentType: "application/json" } });
+}
+
 /* ---------------- Notion ---------------- */
 
 async function notion(env, path, method = "GET", body) {
@@ -335,7 +347,7 @@ async function getWork(env, workId) {
   if (!dsId) {
     dsId = await findEpisodeDataSource(env, workId);
     if (!dsId) throw httpError(404, "이 작품 페이지 안에서 회차 DB를 찾지 못했어요.");
-    await store.put(cacheKey, dsId);
+    await store.put(cacheKey, dsId).catch(() => {}); // 캐시라 실패해도 괜찮음
     ds = await notion(env, `/data_sources/${dsId}`);
   }
 
@@ -636,7 +648,7 @@ async function saveSettings(env, workId, body) {
 ------------------------------------------------------------ */
 
 async function getProgress(env) {
-  return (await kv(env).get("progress", "json")) || { read: [], pos: {}, last: null };
+  return (await stateGet(env, "progress")) || (await kv(env).get("progress", "json")) || { read: [], pos: {}, last: null };
 }
 
 async function mergeProgress(env, body) {
@@ -654,7 +666,7 @@ async function mergeProgress(env, body) {
     last = { workId: String(l.workId || ""), epId: String(l.epId), workTitle: String(l.workTitle || "").slice(0, 100), epTitle: String(l.epTitle || "").slice(0, 200), at: Number(l.at) };
   }
   const next = { read: [...read].slice(-5000), pos, last };
-  await kv(env).put("progress", JSON.stringify(next));
+  if (JSON.stringify(next) !== JSON.stringify(cur)) await statePut(env, "progress", next);
   return next;
 }
 
@@ -696,7 +708,7 @@ async function listVoices(env, engine) {
       desc: [v.labels?.age, v.labels?.accent, v.labels?.description].filter(Boolean).join(" · "),
     }));
   }
-  await store.put(cacheKey, JSON.stringify(voices), { expirationTtl: 60 * 60 * 12 });
+  await store.put(cacheKey, JSON.stringify(voices), { expirationTtl: 60 * 60 * 12 }).catch(() => {}); // 캐시라 실패해도 괜찮음
   return voices;
 }
 
@@ -739,10 +751,21 @@ function stopRatio(env) {
   return r > 0 && r <= 1 ? r : 0.9;
 }
 
-function usageKey(engine, family) { return `usage:${monthKey()}:${engine}:${family}`; }
+async function usageMap(env, month = monthKey()) {
+  const got = await stateGet(env, `usage-${month}`);
+  if (got) return got;
+  // 예전(KV)에 세던 이번 달 사용량을 이어받음
+  const map = {};
+  const list = await kv(env).list({ prefix: `usage:${month}:` });
+  for (const k of list.keys) {
+    const [, , engine, family] = k.name.split(":");
+    map[`${engine}:${family}`] = Number(await kv(env).get(k.name) || 0);
+  }
+  return map;
+}
 
 async function checkQuota(env, engine, family, cost) {
-  const used = Number(await kv(env).get(usageKey(engine, family)) || 0);
+  const used = Number((await usageMap(env))[`${engine}:${family}`] || 0);
   const limit = limitFor(env, engine, family);
   if (used + cost > limit * stopRatio(env)) {
     throw httpError(429, `${engineLabel(engine)}${family !== "all" ? `(${family})` : ""} 이번 달 무료 한도에 거의 다 찼어요. (${used.toLocaleString()} / ${limit.toLocaleString()})`, "QUOTA");
@@ -750,22 +773,21 @@ async function checkQuota(env, engine, family, cost) {
 }
 
 async function addUsage(env, engine, family, cost) {
-  const key = usageKey(engine, family);
-  const used = Number(await kv(env).get(key) || 0);
-  await kv(env).put(key, String(used + cost), { expirationTtl: 60 * 60 * 24 * 70 });
+  const month = monthKey();
+  const map = await usageMap(env, month);
+  const k = `${engine}:${family}`;
+  map[k] = Number(map[k] || 0) + cost;
+  await statePut(env, `usage-${month}`, map);
 }
 
 function engineLabel(e) { return { google: "Google", azure: "Azure", elevenlabs: "ElevenLabs" }[e] || e; }
 
 async function getUsage(env) {
   const month = monthKey();
-  const list = await kv(env).list({ prefix: `usage:${month}:` });
-  const rows = [];
-  for (const k of list.keys) {
-    const [, , engine, family] = k.name.split(":");
-    const used = Number(await kv(env).get(k.name) || 0);
-    rows.push({ engine, family, used, limit: limitFor(env, engine, family) });
-  }
+  const rows = Object.entries(await usageMap(env, month)).map(([k, used]) => {
+    const [engine, family] = k.split(":");
+    return { engine, family, used, limit: limitFor(env, engine, family) };
+  });
   let eleven = null;
   if (env.ELEVENLABS_KEY) {
     try {
