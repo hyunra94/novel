@@ -2149,3 +2149,11 @@ showLock().then(async () => {
   await pullProgress();
   if (!location.hash.startsWith("#/ep/") && cfg.apiBase) route();
 });
+
+/* ---------- 확대 막기 ----------
+   viewport의 user-scalable=no를 무시하는 브라우저(아이폰 Safari 등)를 위해
+   두 손가락 확대와 Ctrl+휠 확대를 직접 막는다(두 번 탭 확대는 CSS touch-action으로). 글자 크기는 설정에서 바꾼다.
+-------------------------------- */
+document.addEventListener("gesturestart", e => e.preventDefault(), { passive: false });
+document.addEventListener("touchmove", e => { if (e.touches.length > 1 || (e.scale && e.scale !== 1)) e.preventDefault(); }, { passive: false });
+document.addEventListener("wheel", e => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
