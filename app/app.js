@@ -1,4 +1,4 @@
-import { assemble } from "./mp3.js";
+import { assemble, mp3Gain } from "./mp3.js";
 import { mockApi } from "./mock.js";
 
 /* =========================================================
@@ -1041,13 +1041,13 @@ const cloudRate = () => prefs.speed * engRate(player.curEngine);
 
 /* 목소리마다 소리 크기 맞추기
    엔진·목소리마다 녹음 크기가 달라서, 문단 음성을 받을 때 말소리 부분의 크기(dB)를 재고
-   목소리별 평균을 기억해 두었다가 재생 볼륨(audio.volume)을 낮춰 TARGET에 맞춘다.
-   (줄이기만 하고 키우지는 않음. 아이폰 Safari는 audio.volume을 무시함) */
-const LOUD_TARGET = -23;
+   목소리별 평균을 기억해 두었다가 mp3 자체를 키우거나 줄여 TARGET에 맞춘다 (아이폰에서도 됨) */
+const LOUD_TARGET = -18;   // 사람 귀 기준 말소리 크기 목표
+const PEAK_MAX = -1;       // 키워도 가장 큰 소리가 이보다 커지지 않게 (찢어짐 방지)
 // 사람 귀 기준(K-weighting, 방송 음량 LUFS와 같은 필터)으로 잰다.
 // 그냥 에너지로 재면 낮은 소리가 많은 남자 목소리가 실제보다 크게 재져서 더 많이 줄어들었음
-const loudDb = LS.get("nr.loud2", {});
-try { localStorage.removeItem("nr.loud"); } catch { /* 예전 값 */ }
+const loudDb = LS.get("nr.loud3", {});
+try { localStorage.removeItem("nr.loud"); localStorage.removeItem("nr.loud2"); } catch { /* 예전 값 */ }
 let loudCtx = null;
 
 async function kWeighted(buf) {
@@ -1067,6 +1067,9 @@ async function measureDb(bytes) {
   try {
     loudCtx = loudCtx || new OfflineAudioContext(1, 1, 24000);
     const buf = await loudCtx.decodeAudioData(bytes.slice().buffer);
+    const raw = buf.getChannelData(0);
+    let pk = 0;
+    for (let j = 0; j < raw.length; j++) { const x = Math.abs(raw[j]); if (x > pk) pk = x; }
     const d = await kWeighted(buf);
     const win = Math.floor(buf.sampleRate * 0.05);
     let sum = 0, n = 0;
@@ -1076,19 +1079,22 @@ async function measureDb(bytes) {
       e /= win;
       if (e > 1e-5) { sum += e; n++; } // -50dB보다 작은 조용한 구간은 빼고
     }
-    return n ? 10 * Math.log10(sum / n) : null;
+    return n ? { db: 10 * Math.log10(sum / n), peak: pk > 0 ? 20 * Math.log10(pk) : -99 } : null;
   } catch { return null; }
 }
 
-async function voiceVolume(engine, voice, bytes) {
+// 목소리마다 말소리 크기를 맞춘 mp3를 돌려준다 (작은 목소리는 키우고 큰 목소리는 줄임).
+// 크기는 목소리별 평균으로 정하고, 키울 때는 이 문단의 가장 큰 소리가 PEAK_MAX를 넘지 않게
+async function levelBytes(engine, voice, bytes) {
   const id = `${engine}:${voice}`;
-  const db = await measureDb(bytes);
-  if (db != null) {
-    loudDb[id] = loudDb[id] == null ? db : loudDb[id] * 0.8 + db * 0.2; // 목소리 평균 (문단마다 크게 흔들리지 않게)
-    LS.set("nr.loud2", loudDb);
-  }
-  const avg = loudDb[id];
-  return avg == null ? 1 : Math.min(1, Math.pow(10, (LOUD_TARGET - avg) / 20));
+  const m = await measureDb(bytes);
+  if (!m) return bytes;
+  loudDb[id] = loudDb[id] == null ? m.db : loudDb[id] * 0.8 + m.db * 0.2; // 문단마다 크게 흔들리지 않게
+  LS.set("nr.loud3", loudDb);
+  let steps = Math.round((LOUD_TARGET - loudDb[id]) / 1.5);
+  steps = Math.min(steps, Math.floor((PEAK_MAX - m.peak) / 1.5), 16);
+  steps = Math.max(steps, -16);
+  return steps ? mp3Gain(bytes.slice(), steps) : bytes;
 }
 
 function cloudGet(i) {
@@ -1108,8 +1114,8 @@ function cloudGet(i) {
         player.refused++;
       }
       const bytes = await chunkBytes(key);
-      const vol = await voiceVolume(used.engine, used.voice, bytes);
-      return { url: URL.createObjectURL(assemble([{ bytes, gap: i === 0 ? 0 : seg.gap }], { tail: 0 }).blob), vol, engine: used.engine };
+      const lv = await levelBytes(used.engine, used.voice, bytes);
+      return { url: URL.createObjectURL(assemble([{ bytes: lv, gap: i === 0 ? 0 : seg.gap }], { tail: 0 }).blob), vol: 1, engine: used.engine };
     })();
     p.catch(() => player.cloud.delete(i)); // 실패하면 다음에 다시 시도
     player.cloud.set(i, p);
@@ -1587,8 +1593,7 @@ async function viewVoices(workId) {
       try {
         const key = await ttsOnce(engine, voice, text);
         const bytes = await chunkBytes(key);
-        const a = new Audio(URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" })));
-        a.volume = await voiceVolume(engine, voice, bytes);
+        const a = new Audio(URL.createObjectURL(new Blob([await levelBytes(engine, voice, bytes)], { type: "audio/mpeg" })));
         a.playbackRate = engRate(engine);
         a.play();
       } catch (e) { toast(e.message, 4000); }

@@ -20,7 +20,7 @@ const GAIN_STEPS = { google: 0, azure: 0, elevenlabs: 6 }; // 시험: ElevenLabs
 // 보낼 때 키우기(1 = 1.5dB): 저장된 음성은 그대로 두고 앱에 보낼 때만 고친다 → 다시 만들지 않아 크레딧이 안 든다.
 // ElevenLabs 한국어 목소리는 저장 때 9dB 줄인 게 너무 작아서 6dB 되돌림. wrangler.toml [vars]의 SERVE_GAIN_엔진으로 덮어쓸 수 있다.
 // 앱에는 키를 "해시.g숫자"로 주니, 값을 바꾸면 앱이 새로 받는다(앱 캐시는 키 기준)
-const SERVE_GAIN = { google: 0, azure: 0, elevenlabs: 4 };
+const SERVE_GAIN = { google: 0, azure: 0, elevenlabs: 0 }; // 지금은 앱이 목소리마다 맞추니 0
 
 export { mp3Gain };
 export default {
