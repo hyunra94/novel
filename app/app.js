@@ -21,7 +21,7 @@ const DEFAULT_API = "https://novelreader.hyunra94.workers.dev";
 let cfg = LS.get("nr.cfg", { apiBase: "", apiKey: "" });
 const prefs = Object.assign({
   fontSize: 18, lineHeight: 1.9, theme: "paper", font: "gowun", showNames: true,
-  hidePlanned: true, autoNext: true, follow: true, speed: 1, mode: "auto", oneVoice: false, preset: "", engRate: { azure: 1.15 },
+  hidePlanned: true, autoNext: true, follow: true, speed: 1, mode: "auto", oneVoice: false, preset: "", engRate: { azure: 1.15 }, autoCpm: 600,
 }, LS.get("nr.prefs", {}));
 const savePrefs = () => LS.set("nr.prefs", prefs);
 
@@ -544,7 +544,7 @@ async function viewReader(workId, epId, jumpBlock = null) {
   reader.epId = epId;
   setHeader("", {
     back: `/work/${workId}`,
-    actions: `<button class="icon" id="rMarks" aria-label="책갈피">🔖</button><button class="icon" id="rListen" aria-label="듣기">🎧</button><button class="icon" id="rLook" aria-label="글자 설정">Aa</button><button class="icon" id="rReload" aria-label="새로고침">⟳</button>`,
+    actions: `<button class="icon" id="rMarks" aria-label="책갈피">🔖</button><button class="icon" id="rAuto" aria-label="자동 스크롤">⇣</button><button class="icon" id="rListen" aria-label="듣기">🎧</button><button class="icon" id="rLook" aria-label="글자 설정">Aa</button><button class="icon" id="rReload" aria-label="새로고침">⟳</button>`,
   });
   view.innerHTML = '<div class="empty">불러오는 중…</div>';
 
@@ -556,6 +556,7 @@ async function viewReader(workId, epId, jumpBlock = null) {
   setTimeout(() => { if (reader.epId === epId) saveReadPos(); }, 600);
 
   $("#rLook").onclick = openLookPanel;
+  $("#rAuto").onclick = () => auto.on ? stopAuto() : startAuto();
   $("#rListen").onclick = () => startListening(workId, epId, firstVisibleBlock());
   setRefresh(async () => {
     const fresh = await loadEpisode(epId, { fresh: true });
@@ -668,6 +669,137 @@ window.addEventListener("scroll", () => {
   reader.saveTimer = setTimeout(saveReadPos, 400);
 }, { passive: true });
 
+
+/* ---------------- 자동 스크롤 (눈으로 읽을 때) ----------------
+   빠르기는 "분당 글자 수". 지금 읽는 줄(화면 위에서 35%)에 걸린 문단의 글자 수로
+   그 문단을 지나가는 시간을 정한다 → 긴 문단은 천천히, 짧은 대사는 빨리.
+   손으로 건드리면 잠깐 멈췄다가 이어서, 회차 끝에서는 "다음 화 자동"이면 다음 화로. */
+const auto = { on: false, paused: false, holdUntil: 0, touching: false, y: 0, last: 0, raf: 0, bi: 0, pendingEp: null, endAt: 0, wake: null };
+const AUTO_LINE = 0.35;
+
+function autoChars(i) {
+  const b = state.ep[reader.epId]?.blocks?.[i];
+  if (!b || b.kind === "divider") return 0;
+  return (b.plain || "").replace(/\s/g, "").length;
+}
+
+function startAuto() {
+  if (isPlaying()) { toast("듣는 중에는 읽는 곳을 따라가요"); return; }
+  auto.on = true; auto.paused = false; auto.pendingEp = null; auto.endAt = 0;
+  auto.y = window.scrollY; auto.last = 0; auto.holdUntil = 0;
+  hideBubble();
+  autoWake(true);
+  renderAutoBar();
+  cancelAnimationFrame(auto.raf);
+  auto.raf = requestAnimationFrame(autoTick);
+}
+
+function stopAuto() {
+  auto.on = false; auto.pendingEp = null;
+  cancelAnimationFrame(auto.raf);
+  autoWake(false);
+  $("#autobar")?.remove();
+  $("#epnav")?.classList.remove("above2");
+}
+
+// 자동 스크롤 중에는 화면이 꺼지지 않게
+async function autoWake(on) {
+  try {
+    if (on && !auto.wake && navigator.wakeLock) { auto.wake = await navigator.wakeLock.request("screen"); auto.wake.addEventListener?.("release", () => { auto.wake = null; }); }
+    if (!on && auto.wake) { await auto.wake.release(); auto.wake = null; }
+  } catch { auto.wake = null; }
+}
+
+function renderAutoBar() {
+  let bar = $("#autobar");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.id = "autobar";
+    bar.onclick = e => {
+      const b = e.target.closest("[data-a]");
+      if (!b) return;
+      e.stopPropagation();
+      const a = b.dataset.a;
+      if (a === "slow" || a === "fast") {
+        prefs.autoCpm = Math.min(2000, Math.max(200, (prefs.autoCpm || 600) + (a === "fast" ? 50 : -50)));
+        savePrefs();
+      }
+      if (a === "pause") { auto.paused = !auto.paused; auto.y = window.scrollY; auto.last = 0; }
+      if (a === "stop") return stopAuto();
+      renderAutoBar();
+    };
+    document.body.appendChild(bar);
+  }
+  bar.innerHTML = `
+    <button data-a="slow" aria-label="느리게">−</button>
+    <span><b>${prefs.autoCpm || 600}</b>자/분</span>
+    <button data-a="fast" aria-label="빠르게">+</button>
+    <button data-a="pause" aria-label="${auto.paused ? "이어서" : "멈춤"}">${auto.paused ? "▶" : "⏸"}</button>
+    <button data-a="stop" aria-label="끄기">✕</button>`;
+  bar.classList.toggle("above", !$("#player").hidden);
+  $("#epnav")?.classList.add("above2");
+}
+
+function autoTick(now) {
+  if (!auto.on) return;
+  auto.raf = requestAnimationFrame(autoTick);
+  const dt = auto.last ? Math.min(0.1, (now - auto.last) / 1000) : 0;
+  auto.last = now;
+
+  // 다음 화로 넘어가는 중: 그 화가 그려지면 1초 뒤 이어서
+  if (auto.pendingEp) {
+    if (!location.hash.startsWith("#/ep/") || reader.epId !== auto.pendingEp) return stopAuto();
+    if (!$("#art")) return;
+    if (!auto.endAt) auto.endAt = now + 1000;
+    if (now < auto.endAt) return;
+    auto.pendingEp = null; auto.endAt = 0; auto.y = window.scrollY; auto.bi = 0;
+    renderAutoBar();
+    return;
+  }
+  if (!location.hash.startsWith("#/ep/") || !$("#art")) return stopAuto();
+  if (isPlaying()) return stopAuto();
+  if (auto.paused || auto.touching || $("#dlg").open || !$("#bubble").hidden || now < auto.holdUntil) { auto.y = window.scrollY; return; }
+  // 그 사이 손으로 옮겼으면 그 자리에서 이어서
+  if (Math.abs(window.scrollY - auto.y) > 3) auto.y = window.scrollY;
+
+  const els = document.querySelectorAll("#art [data-i]");
+  if (!els.length) return;
+  const line = window.innerHeight * AUTO_LINE;
+  let i = Math.min(auto.bi, els.length - 1);
+  while (i > 0 && els[i].getBoundingClientRect().top > line) i--;
+  while (i < els.length - 1 && els[i + 1].getBoundingClientRect().top <= line) i++;
+  auto.bi = i;
+  const top = els[i].getBoundingClientRect().top;
+  const bottom = i < els.length - 1 ? els[i + 1].getBoundingClientRect().top : els[i].getBoundingClientRect().bottom;
+  const secs = Math.max(0.6, autoChars(Number(els[i].dataset.i)) / (prefs.autoCpm || 600) * 60);
+  const speed = Math.max(1, bottom - top) / secs; // px/초
+
+  const max = document.documentElement.scrollHeight - window.innerHeight;
+  const atEnd = window.scrollY >= max - 1 || els[els.length - 1].getBoundingClientRect().bottom < line;
+  if (atEnd) {
+    if (!auto.endAt) auto.endAt = now + 2500;
+    if (now < auto.endAt) return;
+    auto.endAt = 0;
+    saveReadPos();
+    if (prefs.autoNext && reader.next) {
+      auto.pendingEp = reader.next.id;
+      toast("다음 화로 넘어가요");
+      goEp("next");
+    } else { toast("이 화 끝까지 왔어요"); stopAuto(); }
+    return;
+  }
+  auto.endAt = 0;
+  auto.y = Math.min(max, auto.y + speed * dt);
+  window.scrollTo(0, auto.y);
+}
+
+// 손으로 건드리면 멈췄다가 1.5초 뒤 이어서
+document.addEventListener("touchstart", () => { if (auto.on) auto.touching = true; }, { passive: true });
+document.addEventListener("touchend", () => { if (auto.on) { auto.touching = false; auto.holdUntil = performance.now() + 1500; } }, { passive: true });
+document.addEventListener("touchcancel", () => { auto.touching = false; }, { passive: true });
+window.addEventListener("wheel", () => { if (auto.on) auto.holdUntil = performance.now() + 1500; }, { passive: true });
+document.addEventListener("visibilitychange", () => { if (!document.hidden && auto.on) { autoWake(true); auto.last = 0; } });
+
 /* ---------------- 글자 설정 ---------------- */
 
 function openLookPanel() {
@@ -745,6 +877,7 @@ function showEpNav() {
     <button data-go="list">목록</button>
     <button data-go="next" ${reader.next ? "" : "disabled"}>다음 화 ›</button>`;
   nav.classList.toggle("above", !$("#player").hidden);
+  nav.classList.toggle("above2", auto.on);
   nav.classList.add("show");
 }
 

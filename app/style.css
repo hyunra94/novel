@@ -177,6 +177,17 @@ body.locked main, body.locked #player, body.locked #top, body.veil main, body.ve
 #epnav button { border: 0; background: none; color: var(--bg); padding: 11px 14px; border-radius: 10px; font-size: 14px; font-weight: 600; white-space: nowrap; }
 #epnav button:active { background: rgba(255,255,255,.15); }
 #epnav button:disabled { opacity: .35; }
+#epnav.above2 { bottom: calc(76px + env(safe-area-inset-bottom)); }
+#epnav.above.above2 { bottom: calc(160px + env(safe-area-inset-bottom)); }
+
+/* ---------- 자동 스크롤 ---------- */
+#autobar { position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 22; display: flex; align-items: center; gap: 2px; padding: 5px;
+  background: var(--text); color: var(--bg); border-radius: 14px; box-shadow: 0 6px 20px rgba(0,0,0,.22); opacity: .9; font-family: var(--ui); }
+#autobar.above { bottom: calc(100px + env(safe-area-inset-bottom)); }
+#autobar button { border: 0; background: none; color: var(--bg); min-width: 40px; padding: 9px 10px; border-radius: 10px; font-size: 16px; font-weight: 600; }
+#autobar button:active { background: rgba(255,255,255,.15); }
+#autobar span { font-size: 13px; padding: 0 4px; white-space: nowrap; }
+#autobar span b { font-size: 15px; margin-right: 1px; }
 
 /* ---------- 노션에서 새로 불러오기 ---------- */
 #ptr { position: fixed; left: 50%; top: calc(14px + env(safe-area-inset-top)); z-index: 30; width: 38px; height: 38px; margin-left: -19px; border-radius: 50%;
