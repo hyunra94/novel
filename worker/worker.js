@@ -17,6 +17,10 @@ const MAX_TTS_CHARS = 1800;
 // 엔진별로 소리를 줄이는 정도 (1단계 = 1.5dB). 소리가 너무 커서 깨지는 것을 막는다.
 // 바꾸면 그 엔진 음성은 새로 만들어진다(저장 키가 달라짐). wrangler.toml [vars]의 GAIN_STEPS_엔진으로 덮어쓸 수 있다.
 const GAIN_STEPS = { google: 0, azure: 0, elevenlabs: 6 }; // 시험: ElevenLabs가 Google·Azure보다 약 9dB 커서 피크가 0.93까지 감
+// 보낼 때 키우기(1 = 1.5dB): 저장된 음성은 그대로 두고 앱에 보낼 때만 고친다 → 다시 만들지 않아 크레딧이 안 든다.
+// ElevenLabs 한국어 목소리는 저장 때 9dB 줄인 게 너무 작아서 6dB 되돌림. wrangler.toml [vars]의 SERVE_GAIN_엔진으로 덮어쓸 수 있다.
+// 앱에는 키를 "해시.g숫자"로 주니, 값을 바꾸면 앱이 새로 받는다(앱 캐시는 키 기준)
+const SERVE_GAIN = { google: 0, azure: 0, elevenlabs: 4 };
 
 export { mp3Gain };
 export default {
@@ -73,7 +77,7 @@ export default {
       }
       if (path === "/api/usage" && method === "GET") return json({ ok: true, usage: await getUsage(env) }, 200, cors);
       if (path === "/api/tts" && method === "POST") return json({ ok: true, ...(await tts(env, await readJson(request))) }, 200, cors);
-      if ((m = path.match(/^\/api\/chunk\/([a-f0-9]{64})$/)) && method === "GET") return await getChunk(env, m[1], cors);
+      if ((m = path.match(/^\/api\/chunk\/([a-f0-9]{64})(?:\.g(-?\d{1,2}))?$/)) && method === "GET") return await getChunk(env, m[1], Number(m[2] || 0), cors);
 
       return json({ ok: false, error: "Not found", path }, 404, cors);
     } catch (err) {
@@ -818,7 +822,8 @@ async function tts(env, body) {
   const steps = gainSteps(env, engine);
   const hash = await sha256hex(`${engine}\n${voice}\n${model}\n${text}${steps ? `\ng${steps}` : ""}`);
   const key = `chunks/${hash}.mp3`;
-  if (await env.AUDIO.head(key)) return { key: hash, cached: true };
+  const out = h => serveGain(env, engine) ? `${h}.g${serveGain(env, engine)}` : h;
+  if (await env.AUDIO.head(key)) return { key: out(hash), cached: true };
 
   const family = engine === "google" ? googleFamily(voice) : (engine === "elevenlabs" ? model : "all");
   const cost = engine === "elevenlabs" ? Math.ceil(text.length * elevenMultiplier(model)) : text.length;
@@ -828,7 +833,12 @@ async function tts(env, body) {
   if (!audio || audio.byteLength < 100) throw httpError(502, `${engineLabel(engine)}에서 빈 음성이 왔어요.`);
   await env.AUDIO.put(key, audio, { httpMetadata: { contentType: "audio/mpeg" }, customMetadata: { engine, voice } });
   await addUsage(env, engine, family, cost);
-  return { key: hash, cached: false, cost };
+  return { key: out(hash), cached: false, cost };
+}
+
+function serveGain(env, engine) {
+  const v = Number(env[`SERVE_GAIN_${engine.toUpperCase()}`]);
+  return Number.isFinite(v) && v >= -12 && v <= 12 ? Math.round(v) : SERVE_GAIN[engine] || 0;
 }
 
 function gainSteps(env, engine) {
@@ -945,11 +955,12 @@ function escapeXml(s) {
   return String(s).replace(/[<>&'"]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;" }[c]));
 }
 
-async function getChunk(env, hash, cors) {
+async function getChunk(env, hash, gain, cors) {
   if (!env.AUDIO) throw httpError(500, "AUDIO(R2 버킷)가 연결되지 않았어요.");
   const obj = await env.AUDIO.get(`chunks/${hash}.mp3`);
   if (!obj) throw httpError(404, "음성 조각을 찾지 못했어요.");
-  return new Response(obj.body, {
+  const g = Math.max(-12, Math.min(12, gain || 0));
+  return new Response(g ? mp3Gain(new Uint8Array(await obj.arrayBuffer()), g) : obj.body, {
     status: 200,
     headers: { ...cors, "Content-Type": "audio/mpeg", "Cache-Control": "private, max-age=31536000, immutable" },
   });
