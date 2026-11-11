@@ -719,12 +719,14 @@ function renderAutoBar() {
       const b = e.target.closest("[data-a]");
       if (!b) return;
       e.stopPropagation();
+      b.blur();
       const a = b.dataset.a;
       if (a === "slow" || a === "fast") {
         prefs.autoCpm = Math.min(2000, Math.max(200, (prefs.autoCpm || 600) + (a === "fast" ? 50 : -50)));
         savePrefs();
       }
-      if (a === "pause") { auto.paused = !auto.paused; auto.y = window.scrollY; auto.last = 0; }
+      if (a === "pause") return autoTogglePause();
+      if (a === "up") return autoStep(-1);
       if (a === "stop") return stopAuto();
       renderAutoBar();
     };
@@ -734,6 +736,7 @@ function renderAutoBar() {
     <button data-a="slow" aria-label="느리게">−</button>
     <span><b>${prefs.autoCpm || 600}</b>자/분</span>
     <button data-a="fast" aria-label="빠르게">+</button>
+    <button data-a="up" aria-label="한 문단 위로">↑</button>
     <button data-a="pause" aria-label="${auto.paused ? "이어서" : "멈춤"}">${auto.paused ? "▶" : "⏸"}</button>
     <button data-a="stop" aria-label="끄기">✕</button>`;
   bar.classList.toggle("above", !$("#player").hidden);
@@ -792,6 +795,34 @@ function autoTick(now) {
   auto.y = Math.min(max, auto.y + speed * dt);
   window.scrollTo(0, auto.y);
 }
+
+function autoTogglePause() {
+  auto.paused = !auto.paused; auto.y = window.scrollY; auto.last = 0;
+  renderAutoBar();
+}
+
+// 한 문단 위(-1)·아래(+1)로: 그 문단 첫 줄을 읽는 줄에 맞춘다
+function autoStep(dir) {
+  const els = document.querySelectorAll("#art [data-i]");
+  if (!els.length) return;
+  const line = window.innerHeight * AUTO_LINE;
+  let i = 0;
+  while (i < els.length - 1 && els[i + 1].getBoundingClientRect().top <= line + 2) i++;
+  const t = Math.max(0, Math.min(els.length - 1, i + dir));
+  const y = Math.max(0, els[t].getBoundingClientRect().top + window.scrollY - line);
+  auto.bi = t; auto.y = y; auto.last = 0;
+  auto.holdUntil = performance.now() + 1200;
+  window.scrollTo(0, y);
+}
+
+// 키보드: 스페이스 = 멈춤/이어서, ↑/↓ = 한 문단 위/아래 (자동 스크롤 중일 때만)
+document.addEventListener("keydown", e => {
+  if (!auto.on || e.ctrlKey || e.metaKey || e.altKey || $("#dlg").open) return;
+  if (e.target.closest?.("input, textarea, select, [contenteditable]")) return;
+  if (e.code === "Space" || e.key === " ") { e.preventDefault(); autoTogglePause(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); autoStep(-1); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); autoStep(1); }
+});
 
 // 손으로 건드리면 멈췄다가 1.5초 뒤 이어서
 document.addEventListener("touchstart", () => { if (auto.on) auto.touching = true; }, { passive: true });
