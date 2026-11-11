@@ -1044,14 +1044,30 @@ const cloudRate = () => prefs.speed * engRate(player.curEngine);
    목소리별 평균을 기억해 두었다가 재생 볼륨(audio.volume)을 낮춰 TARGET에 맞춘다.
    (줄이기만 하고 키우지는 않음. 아이폰 Safari는 audio.volume을 무시함) */
 const LOUD_TARGET = -23;
-const loudDb = LS.get("nr.loud", {});
+// 사람 귀 기준(K-weighting, 방송 음량 LUFS와 같은 필터)으로 잰다.
+// 그냥 에너지로 재면 낮은 소리가 많은 남자 목소리가 실제보다 크게 재져서 더 많이 줄어들었음
+const loudDb = LS.get("nr.loud2", {});
+try { localStorage.removeItem("nr.loud"); } catch { /* 예전 값 */ }
 let loudCtx = null;
+
+async function kWeighted(buf) {
+  const ctx = new OfflineAudioContext(1, buf.length, buf.sampleRate);
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  const shelf = ctx.createBiquadFilter(); // 높은 소리(말소리 또렷한 부분) +4dB
+  shelf.type = "highshelf"; shelf.frequency.value = 1500; shelf.gain.value = 4;
+  const hp = ctx.createBiquadFilter(); // 아주 낮은 소리는 거의 안 들리니 뺀다
+  hp.type = "highpass"; hp.frequency.value = 100; hp.Q.value = 0.5;
+  src.connect(shelf).connect(hp).connect(ctx.destination);
+  src.start();
+  return (await ctx.startRendering()).getChannelData(0);
+}
 
 async function measureDb(bytes) {
   try {
     loudCtx = loudCtx || new OfflineAudioContext(1, 1, 24000);
     const buf = await loudCtx.decodeAudioData(bytes.slice().buffer);
-    const d = buf.getChannelData(0);
+    const d = await kWeighted(buf);
     const win = Math.floor(buf.sampleRate * 0.05);
     let sum = 0, n = 0;
     for (let k = 0; k + win <= d.length; k += win) {
@@ -1069,7 +1085,7 @@ async function voiceVolume(engine, voice, bytes) {
   const db = await measureDb(bytes);
   if (db != null) {
     loudDb[id] = loudDb[id] == null ? db : loudDb[id] * 0.8 + db * 0.2; // 목소리 평균 (문단마다 크게 흔들리지 않게)
-    LS.set("nr.loud", loudDb);
+    LS.set("nr.loud2", loudDb);
   }
   const avg = loudDb[id];
   return avg == null ? 1 : Math.min(1, Math.pow(10, (LOUD_TARGET - avg) / 20));
