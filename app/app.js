@@ -1662,6 +1662,21 @@ async function voiceList(engine) {
   return r.voices;
 }
 
+// 회차 DB에 "등장인물" 칸이 없는 작품: 회차 본문의 대사에서 말한 사람을 모아 인물 목록으로 쓴다
+// (회차는 한 번 받으면 기기에 남아 있어서 두 번째부터는 빠름)
+async function speakersFromEpisodes(work, vs) {
+  view.innerHTML = '<div class="empty">회차에서 인물을 찾는 중…</div>';
+  const count = {};
+  const eps = (work.episodes || []).filter(e => e.status !== "기획");
+  for (let i = 0; i < eps.length; i += 4) {
+    await Promise.all(eps.slice(i, i + 4).map(e => loadEpisode(e.id).then(ep => ep.lastEdited && e.lastEdited && ep.lastEdited !== e.lastEdited ? loadEpisode(e.id, { fresh: true }) : ep).then(ep => { // 노션에서 고친 회차는 새로 받음
+      for (const b of ep.blocks || []) if (b.kind === "dialogue" && b.speaker) count[b.speaker] = (count[b.speaker] || 0) + 1;
+    }).catch(() => {})));
+  }
+  for (const name of Object.keys(vs.characters || {})) count[name] = count[name] || 0.5; // 목소리를 정해 둔 인물은 남김
+  work.characters = Object.entries(count).sort((a, b) => b[1] - a[1]).map(([name]) => ({ name, color: "default" }));
+}
+
 async function viewVoices(workId) {
   setHeader("목소리", { back: `/work/${workId}` });
   view.innerHTML = '<div class="empty">불러오는 중…</div>';
@@ -1673,6 +1688,7 @@ async function viewVoices(workId) {
   const vs = raw.own || { narrator: null, dialogue: null, fallback: null, characters: {} };
   const common = raw.common?.characters || {};
   const bv = browserVoiceSettings(workId);
+  if (!work.characters?.length) await speakersFromEpisodes(work, vs);
 
   const rows = [
     { key: "narrator", name: "서술 (내레이션)", hint: "회색 글씨 부분", required: true },
