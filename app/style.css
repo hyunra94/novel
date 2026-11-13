@@ -159,6 +159,8 @@ dialog .stack > * + * { margin-top: 12px; }
 .pin-pad .pin-del, .pin-pad .pin-ok { background: none; box-shadow: none; font-size: 16px; font-weight: 600; color: var(--accent); }
 .pin-pad .pin-del { font-size: 24px; color: var(--text); }
 .pin-pad .pin-ok:disabled { opacity: .3; }
+.pin-bio { margin-top: clamp(14px, 3vh, 24px); border: 1px solid var(--line, rgba(0,0,0,.12)); background: none; color: var(--accent); font-size: 15px; font-weight: 600; padding: 10px 18px; border-radius: 12px; }
+.pin-bio + .pin-link { margin-top: 6px; }
 .pin-link { margin-top: clamp(16px, 4vh, 30px); border: 0; background: none; color: var(--sub); font-size: 14px; padding: 8px; }
 .pin-cancel { position: absolute; top: calc(10px + env(safe-area-inset-top)); left: 10px; border: 0; background: none; color: var(--accent); font-size: 16px; font-weight: 600; padding: 10px; }
 body.locked main, body.locked #player, body.locked #top, body.veil main, body.veil #player { visibility: hidden; }

@@ -1919,6 +1919,7 @@ function viewSettings() {
       <div class="row">${lockOn()
         ? '<button class="btn small" id="lkChange">비밀번호 바꾸기</button><button class="btn small" id="lkOff">잠금 끄기</button>'
         : '<button class="btn small primary" id="lkOn">비밀번호 정하기</button>'}</div>
+      <div id="bioRow"></div>
     </div>
     <h2 class="sec">앱 설치</h2>
     <div class="card">
@@ -1942,6 +1943,21 @@ function viewSettings() {
   if ($("#lkOn")) $("#lkOn").onclick = () => openPinDialog("set");
   if ($("#lkChange")) $("#lkChange").onclick = () => openPinDialog("change");
   if ($("#lkOff")) $("#lkOff").onclick = () => openPinDialog("off");
+  if (lockOn()) bioAvailable().then(ok => {
+    const row = $("#bioRow");
+    if (!row) return;
+    if (!ok && !bioOn()) { row.innerHTML = '<p class="muted" style="margin:10px 0 0">이 기기(브라우저)에서는 지문·얼굴 인식을 쓸 수 없어요.</p>'; return; }
+    row.innerHTML = `<div class="row" style="margin-top:10px;align-items:center"><span class="grow">지문·얼굴 인식으로 풀기 <span class="muted">${bioOn() ? "켜짐" : "꺼짐"}</span></span><button class="btn small ${bioOn() ? "" : "primary"}" id="bioBtn">${bioOn() ? "끄기" : "켜기"}</button></div>
+      <p class="muted" style="margin:6px 0 0">휴대폰에 "소설 서재 잠금" 패스키가 하나 생겨요. 안 될 때는 숫자 비밀번호로 풀어요.</p>`;
+    $("#bioBtn").onclick = async () => {
+      if (bioOn()) { LS.del(BIO_KEY); toast("지문·얼굴 인식을 껐어요"); return viewSettings(); }
+      if (await bioEnable()) {
+        if (await bioUnlock()) toast("지문·얼굴 인식으로 풀 수 있어요");
+        else { LS.del(BIO_KEY); toast("확인이 안 돼서 켜지 않았어요"); }
+        viewSettings();
+      }
+    };
+  });
   if ($("#stInstall")) $("#stInstall").onclick = installApp;
   navigator.storage?.estimate?.().then(({ usage }) => { $("#stUse").textContent = `이 기기에 저장된 양: 약 ${(usage / 1048576).toFixed(1)}MB`; }).catch(() => {});
   usageBlock().then(h => { $("#stUsage").innerHTML = h || '<p class="muted">예시 모드에서는 사용량이 없어요.</p>'; }).catch(e => { $("#stUsage").innerHTML = `<p class="muted">${esc(e.message)}</p>`; });
@@ -1963,6 +1979,56 @@ const AWAKE_KEY = "nr.awake";
 const markAwake = () => { if (!document.body.classList.contains("locked")) sessionStorage.setItem(AWAKE_KEY, String(Date.now())); };
 const stillAwake = () => Date.now() - Number(sessionStorage.getItem(AWAKE_KEY) || 0) < RELOCK_MS;
 window.addEventListener("pagehide", markAwake);
+
+/* 지문·얼굴 인식으로 풀기 (패스키/WebAuthn)
+   휴대폰이 지문·얼굴로 본인 확인을 하고, 앱은 "확인됨" 신호만 받는다(생체 정보는 기기 밖으로 안 나감).
+   서버 검사 없이 이 기기 안에서만 쓰는 화면 잠금이라 숫자 비밀번호와 같은 수준. 안 되면 숫자로 푼다. */
+const BIO_KEY = "nr.bio";
+const bioOn = () => lockOn() && Boolean(LS.get(BIO_KEY, null)?.id);
+const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const unb64u = s => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
+
+async function bioAvailable() {
+  try { return Boolean(window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()); }
+  catch { return false; }
+}
+
+async function bioEnable() {
+  try {
+    const cred = await navigator.credentials.create({ publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      rp: { name: "소설 서재", id: location.hostname },
+      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: "소설 서재 잠금", displayName: "소설 서재 잠금" },
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+      authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "discouraged" },
+      attestation: "none",
+      timeout: 60000,
+    } });
+    if (!cred) return false;
+    LS.set(BIO_KEY, { id: b64u(cred.rawId) });
+    return true;
+  } catch (e) {
+    toast(e?.name === "NotAllowedError" ? "취소했어요" : "이 기기에서는 지문·얼굴 인식을 쓸 수 없어요");
+    return false;
+  }
+}
+
+// 성공하면 true. 본인 확인(UV) 표시가 있는지도 본다
+async function bioUnlock() {
+  const bio = LS.get(BIO_KEY, null);
+  if (!bio?.id) return false;
+  try {
+    const a = await navigator.credentials.get({ publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      rpId: location.hostname,
+      allowCredentials: [{ type: "public-key", id: unb64u(bio.id), transports: ["internal", "hybrid"] }],
+      userVerification: "required",
+      timeout: 60000,
+    } });
+    const flags = new Uint8Array(a?.response?.authenticatorData || new ArrayBuffer(0))[32] || 0;
+    return Boolean(a) && b64u(a.rawId) === bio.id && (flags & 0x04) !== 0;
+  } catch { return false; }
+}
 
 async function pinHash(pin, salt) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${salt}:${pin}`));
@@ -2085,8 +2151,26 @@ function showLock() {
       title: "소설 서재",
       sub: "비밀번호를 눌러 주세요",
       len: LS.get(LOCK_KEY, {}).len || null,
-      foot: '<button class="pin-link" id="lkForgot">비밀번호를 잊었어요</button>',
-      mount: h => { $("#lkForgot", h).onclick = forgotDialog; },
+      foot: `${bioOn() ? '<button class="pin-bio" id="lkBio">지문·얼굴 인식으로 풀기</button>' : ""}<button class="pin-link" id="lkForgot">비밀번호를 잊었어요</button>`,
+      mount: (h, pad) => {
+        $("#lkForgot", h).onclick = forgotDialog;
+        const bioBtn = $("#lkBio", h);
+        if (!bioBtn) return;
+        let trying = false;
+        const tryBio = async () => {
+          if (trying) return;
+          trying = true;
+          const ok = await bioUnlock();
+          trying = false;
+          if (!ok || !h.isConnected) return;
+          pad.close();
+          document.body.classList.remove("locked");
+          markAwake();
+          resolve();
+        };
+        bioBtn.onclick = tryBio;
+        if (!document.hidden) setTimeout(tryBio, 300); // 열자마자 한 번 물어봄 (막히면 버튼으로)
+      },
       onPin: async (pin, pad) => {
         if (Date.now() < waitUntil) return pad.fail(`${Math.ceil((waitUntil - Date.now()) / 1000)}초 뒤에 다시 해 주세요`);
         if (await pinMatches(pin)) {
@@ -2134,7 +2218,7 @@ function openPinDialog(mode) {
     cancel,
     onPin: async (pin, p) => {
       if (!(await pinMatches(pin))) return p.fail("비밀번호가 달라요");
-      if (mode === "off") { LS.del(LOCK_KEY); done("잠금을 껐어요"); }
+      if (mode === "off") { LS.del(LOCK_KEY); LS.del(BIO_KEY); done("잠금을 껐어요"); }
       else p.step(newCfg());
     },
   });
