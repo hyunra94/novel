@@ -128,6 +128,8 @@ dialog .stack > * + * { margin-top: 12px; }
 .voice-row .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 .voice-row .sel { display: grid; grid-template-columns: 120px 1fr 44px; gap: 6px; }
 .voice-row .sel.two { grid-template-columns: 1fr 44px; }
+.voice-row.minor { display: none; }
+.minor-toggle { margin: 12px 0 0; width: 100%; }
 .usage { display: grid; gap: 8px; }
 .usage .u { font-size: 13px; }
 .usage .u .bar-mini { height: 6px; }

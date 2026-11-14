@@ -1664,6 +1664,7 @@ async function voiceList(engine) {
 
 // 회차 DB에 "등장인물" 칸이 없는 작품: 회차 본문의 대사에서 말한 사람을 모아 인물 목록으로 쓴다
 // (회차는 한 번 받으면 기기에 남아 있어서 두 번째부터는 빠름)
+const MINOR_LINES = 8; // 모든 회차를 합쳐 대사가 이보다 적으면 조연
 async function speakersFromEpisodes(work, vs) {
   view.innerHTML = '<div class="empty">회차에서 인물을 찾는 중…</div>';
   const count = {};
@@ -1673,8 +1674,11 @@ async function speakersFromEpisodes(work, vs) {
       for (const b of ep.blocks || []) if (b.kind === "dialogue" && b.speaker) count[b.speaker] = (count[b.speaker] || 0) + 1;
     }).catch(() => {})));
   }
-  for (const name of Object.keys(vs.characters || {})) count[name] = count[name] || 0.5; // 목소리를 정해 둔 인물은 남김
-  work.characters = Object.entries(count).sort((a, b) => b[1] - a[1]).map(([name]) => ({ name, color: "default" }));
+  // 대사가 적은 인물(조연)은 접어 둔다. 목소리를 정해 둔 인물은 늘 보이게
+  const set = vs.characters || {};
+  for (const name of Object.keys(set)) count[name] = count[name] || 0;
+  work.characters = Object.entries(count).sort((a, b) => b[1] - a[1])
+    .map(([name, n]) => ({ name, color: "default", minor: n < MINOR_LINES && !set[name] }));
 }
 
 async function viewVoices(workId) {
@@ -1692,7 +1696,9 @@ async function viewVoices(workId) {
 
   const rows = [
     { key: "narrator", name: "서술 (내레이션)", hint: "회색 글씨 부분", required: true },
-    ...work.characters.map(c => ({ key: `c:${c.name}`, name: c.name, color: NOTION_COLORS[c.color] })),
+    ...work.characters.filter(c => !c.minor).map(c => ({ key: `c:${c.name}`, name: c.name, color: NOTION_COLORS[c.color] })),
+    ...(work.characters.some(c => c.minor) ? [{ toggle: work.characters.filter(c => c.minor).length }] : []),
+    ...work.characters.filter(c => c.minor).map(c => ({ key: `c:${c.name}`, name: c.name, color: NOTION_COLORS[c.color], minor: true })),
     { key: "dialogue", name: "그 밖의 인물 대사", hint: "비워 두면 서술 목소리" },
     { key: "fallback", name: "대사가 거절됐을 때", hint: "ElevenLabs가 거절한 줄만 이 목소리로 (비워 두면 서술 목소리)" },
   ];
@@ -1707,8 +1713,8 @@ async function viewVoices(workId) {
     <h2 class="sec">클라우드 음성 · 화면을 꺼도 들려요</h2>
     <div class="card">${usageHtml}
       <p class="muted">인물마다 엔진과 목소리를 골라요. 대사만 ElevenLabs로 읽고 서술은 Google로 읽는 식으로 섞어 쓸 수 있어요. ▶ 미리 듣기도 무료 한도에서 조금 빠져요.</p>
-      ${rows.map(r => `
-        <div class="voice-row" data-key="${esc(r.key)}">
+      ${rows.map(r => r.toggle ? `<button class="btn small minor-toggle" id="vsMinor">조연 ${r.toggle}명 더 보기 <span class="muted">(비워 두면 "그 밖의 인물 대사" 목소리)</span></button>` : `
+        <div class="voice-row${r.minor ? " minor" : ""}" data-key="${esc(r.key)}">
           <div class="who-name">${r.color ? `<span class="dot" style="background:${r.color}"></span>` : ""}${esc(r.name)} ${r.hint ? `<span class="muted">${esc(r.hint)}</span>` : ""}</div>
           <div class="sel">
             <select class="eng"><option value="">${r.required ? "엔진 선택" : r.key.startsWith("c:") ? (common[r.key.slice(2)] ? `공통: ${esc(common[r.key.slice(2)].label || common[r.key.slice(2)].voice)}` : "그 밖의 인물과 같게") : "서술과 같게"}</option>${available.map(e => `<option value="${e}" ${getV(r.key)?.engine === e ? "selected" : ""}>${ENGINE_LABEL[e]}</option>`).join("")}</select>
@@ -1736,7 +1742,7 @@ async function viewVoices(workId) {
       <p class="muted">기기에 깔린 한국어 목소리로 읽어요. 목소리가 1~2개뿐인 기기가 많아서 인물마다 높낮이를 다르게 해서 구분해요. 휴대폰에서는 화면을 끄면 멈출 수 있어요.</p>
       <div class="voice-row"><div class="who-name">서술</div><div class="sel two"><select id="bvN">${sysOpts(bv.narrator)}</select><button class="btn small" data-btry="narr">▶</button></div></div>
       <div class="voice-row"><div class="who-name">대사</div><div class="sel two"><select id="bvD">${sysOpts(bv.dialogue)}</select><button class="btn small" data-btry="dlg">▶</button></div></div>
-      ${work.characters.map((c, i) => {
+      ${work.characters.filter(c => !c.minor).map((c, i) => {
         const p = bv.pitch?.[c.name] ?? AUTO_PITCH[i % AUTO_PITCH.length];
         return `<div class="voice-row"><div class="who-name"><span class="dot" style="background:${NOTION_COLORS[c.color]}"></span>${esc(c.name)} <span class="muted">높낮이 <b data-pv="${esc(c.name)}">${p.toFixed(2)}</b></span></div>
           <div class="sel two"><input type="range" min="0.5" max="1.6" step="0.05" value="${p}" data-pitch="${esc(c.name)}"><button class="btn small" data-btry="c:${esc(c.name)}">▶</button></div></div>`;
@@ -1781,6 +1787,7 @@ async function viewVoices(workId) {
   });
 
   // 지금 화면에서 고른 인물 목소리를 모든 작품 공통으로 (원래 공통에 있던 다른 인물은 그대로)
+  if ($("#vsMinor")) $("#vsMinor").onclick = () => { $("#vsMinor").remove(); view.querySelectorAll(".voice-row.minor").forEach(x => x.classList.remove("minor")); };
   $("#vsCommon") && ($("#vsCommon").onclick = async () => {
     const chars = { ...common };
     let n = 0;
