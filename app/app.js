@@ -302,7 +302,7 @@ async function viewWorks() {
         <button class="icon more" data-more="${w.id}" aria-label="분류 정하기">⋯</button>
       </div>`;
     const all = works || [];
-    const NONE = "\u0000none";
+    const NONE = "__none__"; // 예전 값(NUL 문자)은 HTML 속성에서 바뀌어 버려 눌러도 골라지지 않았음
     let filter = LS.get("nr.shelfFilter", "전체");
     if (filter !== "전체" && filter !== NONE && !shelves.list.includes(filter)) filter = "전체";
     const inShelf = name => all.filter(w => name === NONE ? !shelvesOf(w.id).length : shelvesOf(w.id).includes(name));
