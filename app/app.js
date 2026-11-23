@@ -73,7 +73,7 @@ async function api(path, opts = {}) {
     throw e;
   }
   if (opts.raw) {
-    if (!res.ok) throw new Error(`불러오지 못했어요 (${res.status})`);
+    if (!res.ok) { const e = new Error(`불러오지 못했어요 (${res.status})`); e.status = res.status; throw e; }
     return res;
   }
   const data = await res.json().catch(() => ({ ok: false, error: `응답 오류 (${res.status})` }));
@@ -1197,7 +1197,21 @@ async function startListening(workId, epId, fromBlock = null, { autoplay = true,
    멈추면 더 만들지 않으니, 듣지 않은 부분에는 무료 한도를 쓰지 않는다.
    만든 문단은 Worker(R2)와 이 기기(nr-chunks)에 남아서 다시 들을 때는 한도를 쓰지 않는다.
 ------------------------------------------------- */
-const CLOUD_AHEAD = 3;
+// 걸으면서 들을 때 휴대폰 데이터가 잠깐씩 끊겨도 버티게 넉넉히 (예전 3개는 대사 몇 줄이라 금방 바닥났음)
+const CLOUD_AHEAD = 8;
+
+// 잠깐 끊긴 연결(인터넷 없음, 서버 5xx, 요청 많음)인지. 이럴 땐 멈추지 않고 다시 시도한다
+const transientErr = e => e.offline || (!e.code && (!e.status || e.status >= 500 || e.status === 408 || e.status === 429)) || e.code === "RATE";
+
+// 다음 문단을 기다리는 동안 무음을 틀어 둔다. 소리가 끊기면 휴대폰이 화면 꺼진 앱을 재워서 다음 문단을 못 받아 오기 때문
+let silentUrl = null;
+function playSilence() {
+  if (!silentUrl) silentUrl = URL.createObjectURL(assemble([], { tail: 2 }).blob);
+  player.waiting = true;
+  audio.loop = true;
+  if (audio.src !== silentUrl) audio.src = silentUrl;
+  audio.play().catch(() => {});
+}
 
 /* 엔진마다 말 빠르기가 달라서(Azure가 느림) 재생 속도에 엔진별 배수를 곱한다. 듣기 설정에서 바꿈 */
 const engRate = e => Number(prefs.engRate?.[e]) || 1;
@@ -1294,9 +1308,26 @@ async function cloudPlay(i, { autoplay = true, offset = 0 } = {}) {
   onSegment(i);
   const ready = player.cloud.has(i);
   if (!ready) setStatus("음성 만드는 중…");
+  const wasPlaying = autoplay && (!audio.paused || audio.ended || player.waiting); // 앞 문단이 막 끝난 때도 듣는 중
   try {
-    const { url, vol, engine } = await cloudGet(i);
+    let got;
+    for (let attempt = 0; ; attempt++) {
+      if (!ready || attempt) { if (wasPlaying) playSilence(); }
+      try { got = await cloudGet(i); break; }
+      catch (e) {
+        if (token !== player.token || player.index !== i) return;
+        if (!transientErr(e)) throw e;
+        setStatus("연결이 끊겨서 기다리는 중…");
+        await sleep(Math.min(8000, 2000 * (attempt + 1)));
+        if (token !== player.token || player.index !== i) return;
+      }
+    }
+    const { url, vol, engine } = got;
     if (token !== player.token || player.index !== i) return;
+    const userPaused = player.waiting && audio.paused; // 기다리는 동안 멈춤을 눌렀으면 이어서 틀지 않음
+    if (userPaused) autoplay = false;
+    player.waiting = false;
+    audio.loop = false;
     audio.src = url;
     audio.volume = vol;
     player.curEngine = engine;
@@ -1315,7 +1346,11 @@ async function cloudPlay(i, { autoplay = true, offset = 0 } = {}) {
   (async () => {
     for (let k = i + 1; k <= i + CLOUD_AHEAD && k < player.segs.length; k++) {
       if (token !== player.token) return;
-      try { await cloudGet(k); } catch { return; }
+      try { await cloudGet(k); }
+      catch (e) {
+        if (!transientErr(e)) return;
+        await sleep(4000); k--; // 잠깐 끊긴 거면 같은 문단을 다시
+      }
     }
   })();
   // 이 화 거의 끝이면 다음 화 첫 문단만 미리
@@ -1470,6 +1505,8 @@ function stopPlayback(hide = true) {
   clearTimeout(player.timer);
   if ("speechSynthesis" in window) speechSynthesis.cancel();
   player.playing = false;
+  player.waiting = false;
+  audio.loop = false;
   audio.pause();
   if (hide) {
     $("#player").hidden = true;
@@ -1516,7 +1553,7 @@ function markSpeaking(bi, follow = true) {
 }
 
 audio.addEventListener("timeupdate", () => {
-  if (player.mode !== "cloud" || !player.segs.length) return;
+  if (player.mode !== "cloud" || !player.segs.length || player.waiting) return;
   const d = audio.duration || 1;
   const frac = (player.index + Math.min(1, audio.currentTime / d)) / player.segs.length;
   $("#plBar").style.width = `${frac * 100}%`;
