@@ -1293,7 +1293,8 @@ function cloudGet(i) {
       }
       const bytes = await chunkBytes(key);
       const lv = await levelBytes(used.engine, used.voice, bytes);
-      return { url: URL.createObjectURL(assemble([{ bytes: lv, gap: i === 0 ? 0 : seg.gap }], { tail: 0 }).blob), vol: 1, engine: used.engine };
+      const blob = assemble([{ bytes: lv, gap: i === 0 ? 0 : seg.gap }], { tail: 0 }).blob;
+      return { blob, url: canStream() ? null : URL.createObjectURL(blob), vol: 1, engine: used.engine };
     })();
     p.catch(() => player.cloud.delete(i)); // 실패하면 다음에 다시 시도
     player.cloud.set(i, p);
@@ -1301,7 +1302,150 @@ function cloudGet(i) {
   return p;
 }
 
+/* ---------- 이어 재생(MediaSource) ----------
+   문단마다 audio.src를 갈아 끼우면 갤럭시에서 화면을 끄고 들을 때 문단 첫 글자가 잘리거나
+   다음 문단에서 그냥 멈췄다. 문단 소리를 한 줄기(MediaSource)에 이어 붙여서 재생기는 한 번 틀면 계속 흐르게 한다.
+   다음 문단이 아직 없으면 무음을 조금씩 붙여서 소리가 끊기지 않게(휴대폰이 앱을 재우지 않게) 한다.
+   MediaSource로 mp3를 못 트는 브라우저(예전 아이폰 등)는 아래 예전 방식 */
+const canStream = () => typeof MediaSource !== "undefined" && MediaSource.isTypeSupported?.("audio/mpeg") && !prefs.noStream;
+const XING = 192; // assemble이 맨 앞에 붙이는 Xing 프레임 크기. 이어 붙일 땐 뺀다
+let silenceBytes = null;
+async function silenceChunk() {
+  if (!silenceBytes) silenceBytes = new Uint8Array(await assemble([], { tail: 1 }).blob.arrayBuffer()).subarray(XING);
+  return silenceBytes;
+}
+const sbIdle = sb => sb.updating ? new Promise(r => sb.addEventListener("updateend", r, { once: true })) : Promise.resolve();
+const bufEnd = sb => { try { return sb.buffered.length ? sb.buffered.end(sb.buffered.length - 1) : 0; } catch { return 0; } };
+const inBuf = t => { const b = audio.buffered; for (let k = 0; k < b.length; k++) if (t >= b.start(k) && t < b.end(k)) return true; return false; };
+// 재생이 조금 진행되거나 잠깐 지날 때까지 (화면이 꺼져 있어도 소리가 나는 동안은 timeupdate가 온다)
+const tick = ms => new Promise(r => { const f = () => { audio.removeEventListener("timeupdate", f); r(); }; audio.addEventListener("timeupdate", f); setTimeout(f, ms); });
+
+async function sbAppend(st, bytes) {
+  const sb = st.sb;
+  await sbIdle(sb);
+  // 오래 지난 소리는 비워서 버퍼가 넘치지 않게
+  const t = audio.currentTime;
+  if (t > 120 && sb.buffered.length && sb.buffered.start(0) < t - 60) { sb.remove(0, t - 60); await sbIdle(sb); }
+  try { sb.appendBuffer(bytes); }
+  catch (e) {
+    if (e.name !== "QuotaExceededError") throw e;
+    sb.remove(0, Math.max(0.1, t - 10)); await sbIdle(sb);
+    sb.appendBuffer(bytes);
+  }
+  await sbIdle(sb);
+}
+
+async function streamPlay(i, { autoplay = true } = {}) {
+  const token = player.token;
+  if (player.stream?.url) URL.revokeObjectURL(player.stream.url);
+  const ms = new MediaSource();
+  const st = { ms, sb: null, url: URL.createObjectURL(ms), times: new Map(), next: i };
+  player.stream = st;
+  player.waiting = false;
+  audio.loop = false;
+  audio.src = st.url;
+  player.index = i;
+  onSegment(i);
+  if (!player.cloud.has(i)) setStatus("음성 만드는 중…");
+  const alive = () => player.stream === st && token === player.token;
+  await new Promise(r => ms.addEventListener("sourceopen", r, { once: true }));
+  if (!alive()) return;
+  st.sb = ms.addSourceBuffer("audio/mpeg");
+  st.sb.mode = "sequence";
+  let started = false;
+  const ahead = () => bufEnd(st.sb) - audio.currentTime;
+  try {
+    while (alive() && st.next < player.segs.length) {
+      // 듣고 있는 곳보다 너무 앞서 만들지는 않는다 (무료 한도)
+      if (started && st.next > player.index + CLOUD_AHEAD) { await tick(2000); continue; }
+      const k = st.next;
+      let got = null;
+      for (let attempt = 0; !got && alive(); ) {
+        const p = cloudGet(k);
+        let res = null;
+        while (alive() && !res) {
+          res = await Promise.race([p.then(v => ({ v }), e => ({ e })), sleep(400).then(() => null)]);
+          // 받는 동안 남은 소리가 2초 아래면 무음을 덧붙여 계속 흐르게
+          if (!res && started && !audio.paused && ahead() < 2) {
+            await sbAppend(st, await silenceChunk());
+          }
+        }
+        if (!res || !alive()) return;
+        if (res.v) { got = res.v; break; }
+        if (!transientErr(res.e)) throw res.e;
+        if (started && !audio.paused) setStatus("연결이 끊겨서 기다리는 중…");
+        else setStatus("연결 기다리는 중…");
+        // 잠깐 쉬었다 다시. 쉬는 동안에도 무음은 이어 붙인다
+        const until = Date.now() + Math.min(8000, 2000 * ++attempt);
+        while (alive() && Date.now() < until) {
+          if (started && !audio.paused && ahead() < 2) await sbAppend(st, await silenceChunk());
+          await sleep(400);
+        }
+      }
+      if (!alive()) return;
+      const bytes = new Uint8Array(await got.blob.arrayBuffer()).subarray(XING);
+      if (!alive()) return;
+      const start = bufEnd(st.sb);
+      await sbAppend(st, bytes);
+      if (!alive()) return;
+      st.times.set(k, { start, end: bufEnd(st.sb), engine: got.engine });
+      player.waiting = false;
+      st.next++;
+      if (!started) {
+        started = true;
+        player.curEngine = got.engine;
+        audio.playbackRate = cloudRate();
+        if (autoplay) await audio.play().catch(() => {});
+        updatePlayButton();
+        setStatus(player.refused ? `거절된 대사 ${player.refused}줄은 대신 읽어요` : "");
+      }
+      if (st.next >= player.segs.length - 1) prefetchNextStart();
+    }
+    if (alive()) { await sbIdle(st.sb); if (ms.readyState === "open") ms.endOfStream(); }
+  } catch (e) {
+    if (!alive()) return;
+    if (!started) { setStatus("멈춤"); updatePlayButton(); }
+    return cloudFailed(e, player.workId, player.epId, player.segs[st.next]?.bi ?? 0);
+  }
+}
+
+// 이어 재생 중 시간 → 지금 읽는 문단
+function streamSync() {
+  const st = player.stream;
+  if (!st) return false;
+  const t = audio.currentTime;
+  for (const [k, v] of st.times) {
+    if (t >= v.start && t < v.end) {
+      if (k !== player.index || player.curBlock !== player.segs[k].bi) onSegment(k);
+      if (v.engine !== player.curEngine) { player.curEngine = v.engine; audio.playbackRate = cloudRate(); }
+      $("#plBar").style.width = `${((k + (t - v.start) / Math.max(0.1, v.end - v.start)) / player.segs.length) * 100}%`;
+      player.waiting = false;
+      return true;
+    }
+  }
+  // 이어 붙인 문단들 뒤 무음 구간 = 다음 문단 기다리는 중
+  player.waiting = [...st.times.values()].every(v => t >= v.end);
+  return true;
+}
+
 async function cloudPlay(i, { autoplay = true, offset = 0 } = {}) {
+  if (i >= player.segs.length) return onEpisodeEnd();
+  if (canStream()) {
+    // 이미 이어 붙인 문단이면 그 자리로 옮기기만
+    const v = player.stream?.times.get(i);
+    if (v && inBuf(v.start + 0.05)) {
+      audio.currentTime = v.start + 0.01;
+      onSegment(i);
+      if (autoplay) audio.play().catch(() => {});
+      return;
+    }
+    return streamPlay(i, { autoplay });
+  }
+  player.stream = null;
+  return legacyPlay(i, { autoplay, offset });
+}
+
+async function legacyPlay(i, { autoplay = true, offset = 0 } = {}) {
   const token = player.token;
   if (i >= player.segs.length) return onEpisodeEnd();
   player.index = i;
@@ -1508,6 +1652,7 @@ function stopPlayback(hide = true) {
   player.waiting = false;
   audio.loop = false;
   audio.pause();
+  if (player.stream) { URL.revokeObjectURL(player.stream.url); player.stream = null; }
   if (hide) {
     $("#player").hidden = true;
     markSpeaking(-1);
@@ -1517,7 +1662,9 @@ function stopPlayback(hide = true) {
 
 function seekBy(sec) {
   if (player.mode === "cloud") {
-    if (sec < 0 && audio.currentTime > 3) { audio.currentTime = 0; return; }
+    const cur = player.stream?.times.get(player.index);
+    if (cur) { if (sec < 0 && audio.currentTime - cur.start > 3) { audio.currentTime = cur.start + 0.01; return; } }
+    else if (sec < 0 && audio.currentTime > 3) { audio.currentTime = 0; return; }
     cloudPlay(Math.max(0, Math.min(player.segs.length - 1, player.index + (sec > 0 ? 1 : -1))), { autoplay: !audio.paused });
   } else {
     player.index = Math.max(0, Math.min(player.segs.length - 1, player.index + (sec > 0 ? 1 : -1)));
@@ -1553,7 +1700,15 @@ function markSpeaking(bi, follow = true) {
 }
 
 audio.addEventListener("timeupdate", () => {
-  if (player.mode !== "cloud" || !player.segs.length || player.waiting) return;
+  if (player.mode !== "cloud" || !player.segs.length) return;
+  if (player.stream) {
+    streamSync();
+    if (!$("#plStatus").dataset.lock && !audio.paused && !player.waiting) setStatus(`${player.index + 1} / ${player.segs.length} 문단`);
+    else if (player.waiting && !audio.paused) setStatus("연결이 끊겨서 기다리는 중…");
+    checkSleep();
+    return;
+  }
+  if (player.waiting) return;
   const d = audio.duration || 1;
   const frac = (player.index + Math.min(1, audio.currentTime / d)) / player.segs.length;
   $("#plBar").style.width = `${frac * 100}%`;
@@ -1565,6 +1720,7 @@ audio.addEventListener("pause", updatePlayButton);
 audio.addEventListener("ended", () => {
   if (player.mode !== "cloud") return;
   if (checkSleep()) return;
+  if (player.stream) return onEpisodeEnd(); // 이어 재생은 회차 끝에서만 끝난다
   cloudPlay(player.index + 1);
 });
 
@@ -1582,7 +1738,7 @@ function onEpisodeEnd() {
   queueSync();
   const pos = LS.get(`nr.pos.${epId}`, {});
   delete pos.listenBlock; delete pos.listenTime;
-  player.cloud?.forEach(p => p.then(x => URL.revokeObjectURL(x.url)).catch(() => {}));
+  player.cloud?.forEach(p => p.then(x => x.url && URL.revokeObjectURL(x.url)).catch(() => {}));
   LS.set(`nr.pos.${epId}`, pos);
   player.playing = false;
   updatePlayButton();
